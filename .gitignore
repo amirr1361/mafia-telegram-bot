@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+data/mafia_bot.sqlite3
+data/game_logs/*.jsonl
+.DS_Store
+.cursor/
