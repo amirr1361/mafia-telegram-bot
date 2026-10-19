@@ -61,6 +61,8 @@ class Role(str, Enum):
     TAILOR = "TAILOR"
     PRIEST = "PRIEST"
     TOWN_SIMPLE = "TOWN_SIMPLE"
+    RUSSIAN_GODFATHER = "RUSSIAN_GODFATHER"
+    TERROR = "TERROR"
     # سناریوی نماینده
     DON_MAFIA = "DON_MAFIA"
     YAGHI = "YAGHI"
@@ -246,6 +248,8 @@ class Game:
     mason_intro_day_ability_open: bool = False
     """ماسون — پس از شروع رأی‌گیری، پنل روزانه قفل می‌شود."""
     mason_intro_day_ability_locked: bool = False
+    """ماسون — uidهایی که پیام شب معارفه برایشان ارسال/آینه شده (idempotency)."""
+    mason_intro_night_delivered_uids: set[int] = field(default_factory=set)
     """ماسون — پنل کمک‌کننده «شروع رأی‌گیری» ارسال شده."""
     mason_vote_start_prompt_sent: bool = False
     """ماسون — منتظر تأیید کمک‌کننده برای شروع شب."""
@@ -270,11 +274,27 @@ class Game:
     mason_night_entry_dispatched_night: int | None = None
     """ماسون — شب با اتمام اجباری بسته شده؛ callbackهای دیررس نادیده گرفته می‌شوند."""
     mason_night_force_finished: bool = False
+    """ماسون — نسل تایمر یادآور شب کمک‌کننده (باطل‌سازی تایمر کهنه)."""
+    mason_night_reminder_generation: int = 0
+    """ماسون — chat_id پیام یادآور شب کمک‌کننده."""
+    mason_night_reminder_chat_id: int | None = None
+    """ماسون — message_id پیام یادآور شب کمک‌کننده."""
+    mason_night_reminder_message_id: int | None = None
+    """ماسون — فهرست پایدار uidهای در انتظار هنگام ارسال یادآور."""
+    mason_night_reminder_initial_pending_uids: list[int] = field(default_factory=list)
+    """ماسون — شماره شبی که یادآور به آن تعلق دارد."""
+    mason_night_reminder_night_count: int | None = None
+    """ماسون — آخرین متن یادآور (جلوگیری از edit تکراری)."""
+    mason_night_reminder_last_text: str | None = None
+    """ماسون — created_at ایزو برای هویت اتاق در برابر reuse کد."""
+    mason_night_reminder_created_at_iso: str | None = None
     mason_apache_day_flow_active: bool = False
     mason_cowboy_day_flow_active: bool = False
     mason_apache_day_pending_uid: int | None = None
     mason_cowboy_day_pending_uid: int | None = None
     mason_night_resolution_applied: bool = False
+    # Mason: finalized day/night outcomes for end-of-game history
+    mason_final_night_outcomes: list[dict] = field(default_factory=list)
     mason_last_night_had_collapse: bool = False
     """شب اولین فروپاشی تیم ماسون (برای بازنشستن مشورت پس از یک روز کامل)."""
     mason_collapse_night_number: int | None = None
@@ -461,6 +481,42 @@ class Game:
     )
     mason_role_pick_started_at: str | None = None
     mason_non_real_role_assignment_completed: bool = False
+    russian_mafia_player_role_pick_active: bool = False
+    russian_mafia_role_number_map: dict[int, str] = field(default_factory=dict)
+    russian_mafia_role_number_claims: dict[int, int] = field(default_factory=dict)
+    russian_mafia_player_role_claims: dict[int, dict[str, object]] = field(default_factory=dict)
+    russian_mafia_role_pick_panel_messages: dict[int, tuple[int, int]] = field(default_factory=dict)
+    russian_mafia_role_pick_started_at: str | None = None
+    russian_mafia_non_real_role_assignment_completed: bool = False
+    russian_mafia_mafia_target: int | None = None
+    russian_mafia_mafia_confirmed: bool = False
+    russian_mafia_mafia_action_holder: int | None = None
+    russian_mafia_doctor_target: int | None = None
+    russian_mafia_doctor_targets: list[int] = field(default_factory=list)
+    russian_mafia_doctor_night_capacity: int = 0
+    russian_mafia_doctor_confirmed: bool = False
+    russian_mafia_doctor_self_save_count: int = 0
+    russian_mafia_detective_target: int | None = None
+    russian_mafia_detective_confirmed: bool = False
+    russian_mafia_detective_alignment: str | None = None
+    russian_mafia_terror_day_active: bool = False
+    russian_mafia_terror_target: int | None = None
+    russian_mafia_terror_confirmed: bool = False
+    russian_mafia_mafia_team_revealed: bool = False
+    russian_mafia_intro_prompt_sent: bool = False
+    russian_mafia_day_result_applied: bool = False
+    russian_mafia_night_result_sent_index: int = 0
+    russian_mafia_night_index: int = 0
+    russian_mafia_day_index: int = 0
+    russian_mafia_post_night_stage: str | None = None
+    russian_mafia_discipline_prompt_night: int = 0
+    russian_mafia_discipline_target: int | None = None
+    russian_mafia_table_inquiry_used: int = 0
+    russian_mafia_table_inquiry_pending: str | None = None
+    russian_mafia_inquiry_completed_night: int = 0
+    russian_mafia_citizen_ack_uids: set[int] = field(default_factory=set)
+    russian_mafia_winner_announced: bool = False
+    russian_mafia_observer_roster_sent: bool = False
     """آینهٔ پنل نریتور برای ناظر — ویرایش درجا به‌جای اسپم پیام جدید."""
     bazpors_observer_narrator_mirror_chat_id: int | None = None
     bazpors_observer_narrator_mirror_message_id: int | None = None
@@ -594,6 +650,14 @@ class Game:
     no_host_handoff_gate: str | None = None
     """پس از حذف — ارسال پیام «شما از بازی خارج شدید» (توسط flush)."""
     eliminated_notify_uids: list[int] = field(default_factory=list)
+    # Mozakere: immutable mid-game elim report cutoffs (uid -> payload)
+    mozakere_elim_report_cutoffs: dict[int, dict] = field(default_factory=dict)
+    # Bazpors: immutable mid-game elim report cutoffs (uid -> payload)
+    bazpors_elim_report_cutoffs: dict[int, dict] = field(default_factory=dict)
+    # Mason: immutable mid-game elim report cutoffs (uid -> payload)
+    mason_elim_report_cutoffs: dict[int, dict] = field(default_factory=dict)
+    # Russian Mafia: immutable mid-game elim report cutoffs (uid -> payload)
+    russian_mafia_elim_report_cutoffs: dict[int, dict] = field(default_factory=dict)
     """اولین کلیک روی دکمهٔ آینهٔ هر پیام (کلید ui_key → user_id کلیک‌کننده)."""
     mirror_action_claims: dict[str, int] = field(default_factory=dict)
     """ui_key → {text, player: (chat_id, msg_id), observer: (chat_id, msg_id)}."""

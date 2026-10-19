@@ -288,6 +288,12 @@ async def lock_mason_night_mirror_panels(bot: Bot, game: Game) -> None:
 async def force_finish_mason_night(
     bot: Bot, game: Game, gm: "GameManager"
 ) -> None:
+    try:
+        from bot.mason_night_reminder import cleanup_mason_night_helper_reminder
+
+        await cleanup_mason_night_helper_reminder(bot, game)
+    except Exception:
+        pass
     pending = pending_mason_force_finish_labels(game, gm)
     if pending:
         logger.info(

@@ -65,7 +65,12 @@ async def mason_finish_parallel_night_collect(
     from bot.bazpors_narrator import NIGHT_ACTIONS
     from bot.mason_helper_flow import send_mason_midday_step_prompt
     from bot.mason_night_resolve import apply_mason_night_resolution
+    from bot.mason_night_reminder import cleanup_mason_night_helper_reminder
 
+    try:
+        await cleanup_mason_night_helper_reminder(bot, game)
+    except Exception:
+        pass
     game.no_host_night_parallel_collect_active = False
     game.bazpors_narrator_step = NIGHT_ACTIONS
     apply_mason_night_resolution(game, gm)

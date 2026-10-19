@@ -76,6 +76,7 @@ def any_player_role_pick_active(game: Game) -> bool:
         getattr(game, "bazpors_player_role_pick_active", False)
         or getattr(game, "mozakere_player_role_pick_active", False)
         or getattr(game, "mason_player_role_pick_active", False)
+        or getattr(game, "russian_mafia_player_role_pick_active", False)
     )
 
 

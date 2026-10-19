@@ -880,6 +880,16 @@ def _collect_mason_night_skip_notes(game: Game) -> list[str]:
 async def maybe_finish_mason_parallel_night(
     bot: Bot, game: Game, gm: "GameManager"
 ) -> None:
+    try:
+        from bot.mason_night_reminder import refresh_mason_night_helper_reminder
+
+        await refresh_mason_night_helper_reminder(bot, game, gm)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "mason night reminder refresh failed room=%s", game.room_code
+        )
     if not all_mason_parallel_night_ready(game):
         return
     from bot.no_host_night_ready import maybe_finish_no_host_parallel_night

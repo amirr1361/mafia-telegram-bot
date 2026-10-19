@@ -268,7 +268,12 @@ async def cb_no_host_day1_defense(
     if not callback.from_user or callback.message is None:
         return
     game = manager.get_game(callback_data.code)
-    if not game or not no_host_bot_assistant_flow_enabled(game):
+    from bot.room_mode import is_russian_mafia_host_helper_room
+
+    if not game or not (
+        no_host_bot_assistant_flow_enabled(game)
+        or is_russian_mafia_host_helper_room(game)
+    ):
         await callback.answer("این دکمه برای این اتاق نیست.", show_alert=True)
         return
     assistant_uid = game.bot_assistant_user_id
@@ -407,6 +412,26 @@ async def player_mirror_cb(
     as_uid = callback_data.as_uid
     act = callback_data.act
     room = game.room_code
+
+    if game.scenario_name == "russian_mafia":
+        from bot.russian_mafia_flow import (
+            dispatch_russian_mafia_mirror,
+            generation_from_callback_rid,
+            russian_mirror_act,
+        )
+
+        if russian_mirror_act(act):
+            await dispatch_russian_mafia_mirror(
+                callback,
+                bot,
+                game,
+                as_uid=as_uid,
+                actor_uid=actor,
+                act=act,
+                tid=callback_data.tid,
+                generation=generation_from_callback_rid(callback_data.rid),
+            )
+            return
 
     if chaos_handshake_mirror_act_active(game, act):
         await dispatch_chaos_handshake_mirror(

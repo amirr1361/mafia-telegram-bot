@@ -237,6 +237,13 @@ async def dispatch_mason_night_entry_panels(
             log.exception("mason night entry panel dispatch failed", exc_info=err)
         raise dispatch_errors[0]
     game.mason_night_entry_dispatched_night = nc
+    from bot.mason_night_reminder import (
+        cleanup_mason_night_helper_reminder,
+        schedule_mason_night_helper_reminder,
+    )
+
+    await cleanup_mason_night_helper_reminder(bot, game)
+    schedule_mason_night_helper_reminder(bot, game)
 
 
 def mason_night_wait_act_active(game: Game, act: str) -> bool:

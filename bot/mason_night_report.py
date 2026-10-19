@@ -330,4 +330,16 @@ def build_mason_night_timeline_lines(
     nato_line = _mason_night_report_nato_line(game, gm)
     if nato_line:
         lines.append(nato_line)
+    from bot.mason_final_outcome import (
+        format_mason_history_outcome_lines_for_game,
+        record_mason_final_night_outcome,
+    )
+
+    entry = record_mason_final_night_outcome(game, gm)
+    if entry is not None:
+        outcome = format_mason_history_outcome_lines_for_game(game, gm, entry)
+        if outcome and outcome[0] not in lines:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(outcome)
     return lines

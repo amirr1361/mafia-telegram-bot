@@ -62,7 +62,11 @@ from bot.main import (
     send_no_host_bot_assistant_prompt,
     _OBSERVER_CMD_RE,
 )
-from bot.room_mode import is_no_host_player_room, lobby_dev_fill_enabled
+from bot.room_mode import (
+    is_no_host_player_room,
+    is_russian_mafia_host_helper_room,
+    lobby_dev_fill_enabled,
+)
 from bot.main import JoinFlowResult
 from bot.models import Game, Phase, Player, Role
 from bot.post_game_flow import resolve_game_context
@@ -206,6 +210,20 @@ async def cb_create_players(
         return
     if callback_data.slug not in manager.scenarios:
         await callback.answer("انتخاب نامعتبر است.", show_alert=True)
+        return
+    if callback_data.slug == "russian_mafia":
+        from bot.russian_mafia import PLAYER_COUNTS, russian_host_mode_keyboard
+
+        if callback_data.count not in PLAYER_COUNTS:
+            await callback.answer("مافیای روسی: فقط ۸ یا ۹ بازیکن.", show_alert=True)
+            return
+        await callback.answer()
+        if callback.message:
+            label = manager.scenario_display_name(callback_data.slug)
+            await callback.message.edit_text(
+                "🎭 سناریو: " + label + "\n\nنوع گردانندگی را انتخاب کنید:",
+                reply_markup=russian_host_mode_keyboard(callback_data.count),
+            )
         return
     if callback_data.slug in _HOST_MODE_PLAYER_COUNTS:
         allowed = _HOST_MODE_PLAYER_COUNTS[callback_data.slug]
@@ -356,6 +374,11 @@ async def cb_create_host_mode(
 ) -> None:
     if not callback.message or callback.message.chat.type != ChatType.PRIVATE:
         await callback.answer("فقط در چت خصوصی با ربات.", show_alert=True)
+        return
+    if callback_data.slug == "russian_mafia":
+        from bot.russian_mafia_flow import accept_russian_host_mode
+
+        await accept_russian_host_mode(callback, bot, callback_data)
         return
     if callback_data.mode not in ("semi_auto", "manual", "no_host"):
         await callback.answer("انتخاب نامعتبر.", show_alert=True)
@@ -598,6 +621,11 @@ async def cb_semi_auto_dev_lobby(
 
     if is_no_host_player_room(game):
         err_code = manager.fill_no_host_synthetic_lobby(game)
+    elif (
+        game.scenario_name == "russian_mafia"
+        and game.bazpors_host_mode == "host_helper"
+    ):
+        err_code = manager.fill_russian_mafia_synthetic_lobby(game)
     else:
         err_code = manager.fill_bazpors_semi_auto_synthetic_lobby(game)
     if err_code == "has_real_players":
@@ -621,7 +649,10 @@ async def cb_semi_auto_dev_lobby(
     )
     synth_n = len(game.players) - real_n
     await callback.answer("لابی پر شد.")
-    if is_no_host_player_room(game):
+    if is_no_host_player_room(game) or (
+        game.scenario_name == "russian_mafia"
+        and game.bazpors_host_mode == "host_helper"
+    ):
         note = (
             f"\n\n<i>🎲 {_fa_digits(real_n)} بازیکن واقعی + "
             f"{_fa_digits(synth_n)} بازیکن تست — "
@@ -656,6 +687,31 @@ async def cb_no_host_observer_prompt(
     if not callback.from_user:
         return
     game = manager.get_game(callback_data.code)
+    if game and game.scenario_name == "russian_mafia" and game.bazpors_host_mode == "host_helper":
+        if callback.from_user.id != game.host_id:
+            await callback.answer("فقط کمک‌کنندهٔ این اتاق.", show_alert=True)
+            return
+        if callback_data.act == "skip" and game.observer_user_id is not None:
+            await callback.answer("ناظر قبلاً ثبت شده؛ نمی‌توانید لغو کنید.", show_alert=True)
+            return
+        if callback_data.act == "skip":
+            game.observer_prompt_status = "skipped"
+            await callback.answer("بدون ناظر ادامه می‌دهید.")
+        elif callback_data.act == "code_sent":
+            if game.observer_user_id is None:
+                game.observer_prompt_status = "code_sent"
+            await callback.answer("ثبت شد.")
+        else:
+            await callback.answer("دکمه نامعتبر.", show_alert=True)
+            return
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from bot.russian_mafia_flow import on_observer_prompt_done
+
+        await on_observer_prompt_done(bot, game)
+        return
     if not game or not is_no_host_player_room(game):
         await callback.answer("این دکمه برای این اتاق نیست.", show_alert=True)
         return
@@ -715,7 +771,10 @@ async def cb_no_host_bot_assistant_pick(
     if not callback.from_user:
         return
     game = manager.get_game(callback_data.code)
-    if not game or not no_host_bot_assistant_flow_enabled(game):
+    russian_room = bool(game and is_russian_mafia_host_helper_room(game))
+    if not game or not (
+        no_host_bot_assistant_flow_enabled(game) or russian_room
+    ):
         await callback.answer(
             "کمک‌کننده ربات فقط در حالت «گردانندگی بدون گرداننده» فعال است.",
             show_alert=True,
@@ -748,6 +807,9 @@ async def cb_no_host_bot_assistant_pick(
         )
         return
 
+    if is_russian_mafia_host_helper_room(game):
+        game.bot_assistant_user_id = assistant_uid
+
     await callback.answer("انتخاب انجام شد.")
     ap = game.players.get(assistant_uid)
     assistant_tag = html.escape(
@@ -767,6 +829,13 @@ async def cb_no_host_bot_assistant_pick(
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
+    if is_russian_mafia_host_helper_room(game):
+        from bot.russian_mafia_flow import finalize_russian_bot_helper
+
+        await finalize_russian_bot_helper(
+            bot, game, assistant_uid, random_pick=random_pick
+        )
+        return
     await finalize_no_host_bot_assistant(
         bot, game, assistant_uid, random_pick=random_pick
     )

@@ -15,6 +15,7 @@ from bot.main import (
     SalamatHostPanel,
     _host_shuffle_hides_player_names,
     _require_private,
+    build_no_host_bot_assistant_prompt_html,
     build_shuffle_confirm_prompt_html,
     bump_seat_shuffle_count,
     deal_roles_full_pipeline,
@@ -22,6 +23,7 @@ from bot.main import (
     host_deal_roles_keyboard,
     host_seat_confirm_keyboard,
     is_bazpors_narrator_room,
+    no_host_bot_assistant_pick_keyboard,
     safe_edit_text,
 )
 from bot.bazpors_player_role_pick import (
@@ -37,6 +39,7 @@ from bot.mason_player_role_pick import (
     start_player_role_pick as start_mason_role_pick,
 )
 from bot.player_role_pick_common import any_player_role_pick_active
+from bot.room_mode import is_russian_mafia_host_helper_room
 from bot.models import Game, Phase, Player, Role
 from bot.post_game_flow import resolve_game_context
 from bot.text_fa import fa_digits as _fa_digits
@@ -128,6 +131,15 @@ async def confirmshuffle_cmd(msg: Message, bot: Bot) -> None:
         await msg.answer(str(err))
         return
 
+    if is_russian_mafia_host_helper_room(game):
+        await msg.answer("✅ صندلی‌ها ثبت شد و شماره‌ها برای بازیکنان فرستاده شد.")
+        from bot.russian_mafia_flow import (
+            continue_russian_mafia_after_seat_confirmation,
+        )
+
+        await continue_russian_mafia_after_seat_confirmation(bot, game)
+        return
+
     await msg.answer(
         "✅ صندلی‌ها ثبت شد و شماره‌ها برای بازیکنان فرستاده شد.\n\n"
         "برای ادامه «پخش نقش‌های تصادفی» را بزنید:",
@@ -214,11 +226,28 @@ async def host_panel_cb(
     if not callback.from_user:
         return
     game = manager.get_game(callback_data.code)
-    if not game or callback.from_user.id != game.host_id:
+    if not game:
         await safe_callback_answer(callback, "فقط گرداننده همین اتاق.", show_alert=True)
         return
-
     act = callback_data.act
+    if is_russian_mafia_host_helper_room(game):
+        helper_id = game.bot_assistant_user_id
+        if helper_id is None:
+            if callback.from_user.id != game.host_id or act not in ("fs", "sr", "sy", "dr", "pr", "fd"):
+                await safe_callback_answer(
+                    callback,
+                    "تا انتخاب کمک‌کننده، فقط سازندهٔ اتاق شافل صندلی را انجام می‌دهد.",
+                    show_alert=True,
+                )
+                return
+        elif callback.from_user.id != helper_id:
+            await safe_callback_answer(
+                callback, "فقط کمک‌کننده ربات.", show_alert=True
+            )
+            return
+    elif callback.from_user.id != game.host_id:
+        await safe_callback_answer(callback, "فقط گرداننده همین اتاق.", show_alert=True)
+        return
 
     if game.scenario_name == "bazpors_salamat_test" and act in (
         "fs",
@@ -331,6 +360,18 @@ async def host_panel_cb(
         except ValueError as err:
             await callback.message.answer(str(err)[:500])
             return
+        if is_russian_mafia_host_helper_room(game):
+            await safe_edit_text(
+                callback.message,
+                "✅ شماره صندلی‌ها ثبت و برای بازیکنان فرستاده شد.",
+                reply_markup=None,
+            )
+            from bot.russian_mafia_flow import (
+                continue_russian_mafia_after_seat_confirmation,
+            )
+
+            await continue_russian_mafia_after_seat_confirmation(bot, game)
+            return
         await safe_edit_text(
             callback.message,
             "✅ شماره صندلی‌ها ثبت و برای بازیکنان فرستاده شد.\n\n"
@@ -362,14 +403,17 @@ async def host_panel_cb(
             else:
                 await callback.message.answer(f"⚠️ {err}")
             return
-        await safe_edit_text(
-            callback.message,
-            "✅ نقش‌ها پخش شد. لیست کامل نقش‌ها فقط برای شما در پیام جدا فرستاده شد."
-        )
+        if game.scenario_name == "russian_mafia":
+            dealt_note = "✅ نقش‌ها به‌صورت خصوصی برای بازیکنان فرستاده شد."
+        else:
+            dealt_note = (
+                "✅ نقش‌ها پخش شد. لیست کامل نقش‌ها فقط برای شما در پیام جدا فرستاده شد."
+            )
+        await safe_edit_text(callback.message, dealt_note)
         return
 
     if act == "pr":
-        if game.scenario_name not in ("bazpors", "mozakere", "masoon"):
+        if game.scenario_name not in ("bazpors", "mozakere", "masoon", "russian_mafia"):
             await safe_callback_answer(
                 callback,
                 "این گزینه برای این سناریو فعال نیست.",
@@ -392,6 +436,14 @@ async def host_panel_cb(
         elif game.scenario_name == "mozakere":
             err = start_mozakere_role_pick(game)
             dispatch = dispatch_mozakere_role_pick_panels
+        elif game.scenario_name == "russian_mafia":
+            from bot.russian_mafia_player_role_pick import (
+                dispatch_player_role_pick_panels as dispatch_russian_role_pick_panels,
+                start_player_role_pick as start_russian_role_pick,
+            )
+
+            err = start_russian_role_pick(game)
+            dispatch = dispatch_russian_role_pick_panels
         else:
             err = start_mason_role_pick(game)
             dispatch = dispatch_mason_role_pick_panels

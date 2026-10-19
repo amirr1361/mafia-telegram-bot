@@ -9,7 +9,10 @@ from aiogram import Bot
 
 from bot.game import is_mafia_team, is_synthetic_player_uid
 from bot.models import Game, Player, Role
-from bot.observer_delivery import mirror_per_player_to_observer
+from bot.observer_delivery import (
+    mirror_per_player_to_observer,
+    no_host_observer_registered,
+)
 from bot.room_mode import is_mason_scenario
 from bot.roles.mason_apache import apache_receives_mafia_intro
 from bot.tg_send import safe_send_message
@@ -62,20 +65,40 @@ def build_mason_intro_night_mafia_dm_html(game: Game) -> str:
 async def deliver_mason_intro_night_started_messages(
     bot: Bot, game: Game
 ) -> None:
-    """پیام معارفه — آپاچی همان پیام شهروندان را می‌گیرد."""
+    """پیام معارفه — آپاچی همان پیام شهروندان را می‌گیرد.
+
+    بازیکن واقعی: DM یک‌بار + آینهٔ ناظر (در صورت ثبت ناظر).
+    صندلی مصنوعی: بدون DM تلگرام؛ آینهٔ ناظر برای همان متن معرفی (idempotent).
+    """
+    delivered = game.mason_intro_night_delivered_uids
     civilian_text = build_mason_intro_night_civilian_html()
     mafia_text = build_mason_intro_night_mafia_dm_html(game)
+    observer_ok = no_host_observer_registered(game)
+
     for uid, p in game.players.items():
-        if not p.is_alive or is_synthetic_player_uid(uid):
+        if not p.is_alive:
             continue
         if p.role and apache_receives_mafia_intro(game, p):
             text = mafia_text
         else:
             text = civilian_text
+
+        if is_synthetic_player_uid(uid):
+            if uid in delivered or not observer_ok:
+                continue
+            await mirror_per_player_to_observer(
+                bot, game, uid, text, parse_mode="HTML"
+            )
+            delivered.add(uid)
+            continue
+
+        if uid in delivered:
+            continue
         await safe_send_message(bot, uid, text, parse_mode="HTML")
         await mirror_per_player_to_observer(
             bot, game, uid, text, parse_mode="HTML"
         )
+        delivered.add(uid)
 
 
 async def mason_after_intro_night_started(

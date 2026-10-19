@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from bot.game import GameManager
+from bot.game import GameManager, is_synthetic_player_uid
 from bot.mason_day_ability import (
     build_mason_apache_elim_broadcast_html,
     build_mason_cowboy_elim_broadcast_html,
@@ -27,6 +27,7 @@ from bot.mason_night_ready import all_mason_parallel_night_ready
 from bot.models import Player, Role
 from bot.no_host_interrog_day import should_enter_no_host_interrog_day
 from bot.roles import mason_apache as ms_ap
+from bot.observer_delivery import observer_player_copy_prefix
 
 
 def _p(uid: int, name: str, role: Role, *, alive: bool = True, seat: int | None = None) -> Player:
@@ -366,6 +367,197 @@ class MasonFlowIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def test_mason_helper_callback_prefix(self) -> None:
         cb = MasonHelperCb(code="MS01", act="go", kind="vote")
         self.assertTrue(cb.pack().startswith("msh:"))
+
+
+
+class MasonSyntheticMafiaIntroObserverTests(unittest.IsolatedAsyncioTestCase):
+    """آینهٔ معرفی مافیای مصنوعی برای ناظر — سناریوی Room-95 style."""
+
+    def _mixed_game(self, gm: GameManager, *, with_observer: bool = True):
+        game = _mason_game(gm, n=12)
+        if with_observer:
+            game.observer_prompt_status = "registered"
+            game.observer_user_id = 999
+            game.observer_full_name = "Observer"
+        gm.add_player(game, _p(108214166, "Amir", Role.SNIPER, seat=4))
+        gm.add_player(game, _p(-920008, "ابوالفضل - گادفادر", Role.GODFATHER, seat=11))
+        gm.add_player(game, _p(-920010, "بهنام - جاسوس", Role.SPY, seat=2))
+        gm.add_player(game, _p(-920007, "عرفان - خرابکار", Role.SABOTEUR, seat=9))
+        gm.add_player(game, _p(-920003, "علیرضا - آپاچی", Role.APACHE, seat=6))
+        gm.add_player(game, _p(-920011, "خسروی - پزشک", Role.DOCTOR, seat=1))
+        gm.add_player(game, _p(55, "TownReal", Role.DOCTOR, seat=3))
+        return game
+
+    async def _run(self, game):
+        bot = MagicMock()
+        sends: list[tuple[int, str]] = []
+
+        async def _capture(bot_, uid, text, **kw):
+            sends.append((uid, text))
+
+        with (
+            patch("bot.mason_intro_flow.safe_send_message", side_effect=_capture),
+            patch("bot.observer_delivery.safe_send_message", side_effect=_capture),
+        ):
+            await deliver_mason_intro_night_started_messages(bot, game)
+        return sends
+
+    async def test_mafia_intro_message_generated(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        mafia = build_mason_intro_night_mafia_dm_html(game)
+        self.assertIn("📋 <b>اعضای تیم مافیا:</b>", mafia)
+        self.assertIn("گادفادر", mafia)
+        self.assertIn("جاسوس", mafia)
+        self.assertIn("خرابکار", mafia)
+        self.assertNotIn("آپاچی", mafia)
+
+    async def test_real_mafia_still_receive_dm(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        gm.add_player(game, _p(77, "RealSpy", Role.SPY, seat=8))
+        sends = await self._run(game)
+        mafia = build_mason_intro_night_mafia_dm_html(game)
+        self.assertEqual([t for u, t in sends if u == 77], [mafia])
+
+    async def test_synthetic_mafia_not_sent_telegram_dm(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        sends = await self._run(game)
+        for uid in (-920008, -920010, -920007):
+            self.assertTrue(is_synthetic_player_uid(uid))
+            self.assertEqual([t for u, t in sends if u == uid], [])
+
+    async def test_synthetic_mafia_mirrored_to_observer(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        sends = await self._run(game)
+        mafia = build_mason_intro_night_mafia_dm_html(game)
+        obs = [t for u, t in sends if u == 999]
+        for uid in (-920008, -920010, -920007):
+            prefix = observer_player_copy_prefix(game, uid)
+            matches = [t for t in obs if t.startswith(prefix) and mafia in t]
+            self.assertEqual(len(matches), 1, msg=f"uid={uid}")
+
+    async def test_observer_copy_identifies_synthetic_player(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        sends = await self._run(game)
+        prefix = observer_player_copy_prefix(game, -920008)
+        gf_mirrors = [t for u, t in sends if u == 999 and t.startswith(prefix)]
+        self.assertEqual(len(gf_mirrors), 1)
+        self.assertIn("ابوالفضل - گادفادر", gf_mirrors[0])
+        self.assertIn("۱۱", gf_mirrors[0])
+
+    async def test_observer_copy_preserves_exact_mafia_intro(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        sends = await self._run(game)
+        mafia = build_mason_intro_night_mafia_dm_html(game)
+        prefix = observer_player_copy_prefix(game, -920008)
+        gf_mirrors = [t for u, t in sends if u == 999 and t.startswith(prefix)]
+        self.assertEqual(len(gf_mirrors), 1)
+        self.assertIn(mafia, gf_mirrors[0])
+
+    async def test_no_observer_no_extra_message_or_error(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm, with_observer=False)
+        sends = await self._run(game)
+        targets = {u for u, _ in sends}
+        self.assertNotIn(999, targets)
+        for uid in (-920008, -920010, -920007, -920003, -920011):
+            self.assertNotIn(uid, targets)
+        self.assertIn(108214166, targets)
+        self.assertIn(55, targets)
+
+    async def test_town_never_receives_mafia_intro(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        sends = await self._run(game)
+        mafia = build_mason_intro_night_mafia_dm_html(game)
+        civ = build_mason_intro_night_civilian_html()
+        self.assertEqual([t for u, t in sends if u == 55], [civ])
+        self.assertNotIn(mafia, [t for u, t in sends if u == 55])
+
+    async def test_other_room_observer_isolated(self) -> None:
+        gm = GameManager()
+        game_a = self._mixed_game(gm)
+        game_b = _mason_game(gm, n=12)
+        game_b.observer_prompt_status = "registered"
+        game_b.observer_user_id = 888
+        game_b.observer_full_name = "OtherObs"
+        gm.add_player(game_b, _p(-920001, "OtherGF", Role.GODFATHER, seat=1))
+        sends = await self._run(game_a)
+        self.assertEqual([t for u, t in sends if u == 888], [])
+        self.assertTrue(any(u == 999 for u, _ in sends))
+
+    async def test_bot_helper_does_not_get_mafia_intro(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        sends = await self._run(game)
+        self.assertEqual([t for u, t in sends if u == 900], [])
+
+    async def test_real_player_mirror_not_duplicated(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        sends = await self._run(game)
+        civ = build_mason_intro_night_civilian_html()
+        self.assertEqual([t for u, t in sends if u == 108214166], [civ])
+        mirrors = [t for u, t in sends if u == 999 and "Amir" in t and civ in t]
+        self.assertEqual(len(mirrors), 1)
+
+    async def test_idempotent_second_delivery(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm)
+        bot = MagicMock()
+        sends: list[tuple[int, str]] = []
+
+        async def _capture(bot_, uid, text, **kw):
+            sends.append((uid, text))
+
+        with (
+            patch("bot.mason_intro_flow.safe_send_message", side_effect=_capture),
+            patch("bot.observer_delivery.safe_send_message", side_effect=_capture),
+        ):
+            await deliver_mason_intro_night_started_messages(bot, game)
+            first = len(sends)
+            await deliver_mason_intro_night_started_messages(bot, game)
+            second = len(sends)
+        self.assertEqual(first, second)
+        for uid in (-920008, -920010, -920007):
+            prefix = observer_player_copy_prefix(game, uid)
+            self.assertEqual(
+                sum(1 for u, t in sends if u == 999 and t.startswith(prefix)),
+                1,
+            )
+
+    async def test_late_observer_gets_synthetic_mafia_mirrors(self) -> None:
+        gm = GameManager()
+        game = self._mixed_game(gm, with_observer=False)
+        bot = MagicMock()
+        sends: list[tuple[int, str]] = []
+
+        async def _capture(bot_, uid, text, **kw):
+            sends.append((uid, text))
+
+        with (
+            patch("bot.mason_intro_flow.safe_send_message", side_effect=_capture),
+            patch("bot.observer_delivery.safe_send_message", side_effect=_capture),
+        ):
+            await deliver_mason_intro_night_started_messages(bot, game)
+            self.assertEqual([t for u, t in sends if u == 999], [])
+            game.observer_prompt_status = "registered"
+            game.observer_user_id = 999
+            game.observer_full_name = "Observer"
+            await deliver_mason_intro_night_started_messages(bot, game)
+        mafia = build_mason_intro_night_mafia_dm_html(game)
+        for uid in (-920008, -920010, -920007):
+            prefix = observer_player_copy_prefix(game, uid)
+            matches = [
+                t for u, t in sends if u == 999 and t.startswith(prefix) and mafia in t
+            ]
+            self.assertEqual(len(matches), 1)
+
 
 
 if __name__ == "__main__":

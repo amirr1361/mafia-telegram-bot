@@ -149,6 +149,7 @@ SCENARIO_LABELS_FA: dict[str, str] = {
     # موقت برای تست؛ بعد از تست حذف شود
     "masoon2": "ماسون ۲نفره (تست)",
     "mozakere": "مذاکره",
+    "russian_mafia": "مافیای روسی",
 }
 
 DEFAULT_SCENARIO_KEY = "namayande"
@@ -206,6 +207,8 @@ ROLE_LABELS_FA: dict[Role, str] = {
     Role.TOWN_LAWYER: "وکیل شهروند",
     Role.SOLDIER: "سرباز",
     Role.OBSERVER: "ناظر بازی",
+    Role.RUSSIAN_GODFATHER: "گادفادر",
+    Role.TERROR: "ترور",
 }
 
 MOZAKERE_ROLE_LABELS_FA: dict[Role, str] = {
@@ -232,6 +235,10 @@ def scenario_role_label_fa(game: Game, role: Role | None) -> str:
         return "—"
     if game.scenario_name == "mozakere":
         return mozakere_role_label_fa(role)
+    if game.scenario_name == "russian_mafia":
+        from bot.russian_mafia import russian_role_label_fa
+
+        return russian_role_label_fa(role)
     return role_label_fa(role)
 
 
@@ -256,6 +263,8 @@ def is_mafia_team(role: Role | None) -> bool:
         Role.DON_MAFIA,
         Role.YAGHI,
         Role.HACKER_MAFIA,
+        Role.RUSSIAN_GODFATHER,
+        Role.TERROR,
     )
 
 
@@ -650,6 +659,18 @@ def role_roster_banner_text(scenario_name: str, max_players: int, gm: "GameManag
             town_roles,
         )
 
+    if scenario_name == "russian_mafia":
+        from bot.russian_mafia import russian_role_label_fa
+
+        mafia_roles = [r for r in roles if is_mafia_team(r)]
+        town_roles = [r for r in roles if not is_mafia_team(r)]
+        return _grouped_roster_block(
+            f"نقش‌ها — سناریو مافیای روسی ({_digits_fa(max_players)} نفره):",
+            mafia_roles,
+            town_roles,
+            label_fn=russian_role_label_fa,
+        )
+
     mafia_n = sum(1 for r in roles if is_mafia_team(r))
     town_n = len(roles) - mafia_n
     lines = [
@@ -710,6 +731,7 @@ class GameManager:
             "masoon": [],
             "masoon2": [Role.MAFIA, Role.CITIZEN],
             "mozakere": [],
+            "russian_mafia": [],
         }
 
     def _rebuild_room_indexes(self, game: Game) -> None:
@@ -801,6 +823,10 @@ class GameManager:
             return masoon_roles_for_count(max_players)
         if scenario_name == "namayande":
             return namayande_roles_for_count(max_players)
+        if scenario_name == "russian_mafia":
+            from bot.russian_mafia import russian_roles_for_count
+
+            return russian_roles_for_count(max_players)
         roles = list(self._scenario_roles(scenario_name))
         while len(roles) < max_players:
             roles.append(Role.CITIZEN)
@@ -814,6 +840,7 @@ class GameManager:
             "takavar",
             "masoon",
             "namayande",
+            "russian_mafia",
         ):
             return []
         roles = self.scenarios.get(scenario_name)
@@ -862,6 +889,13 @@ class GameManager:
         elif scenario_key == "namayande":
             if max_players not in NAMAYANDEH_PLAYER_COUNTS:
                 return None
+        elif scenario_key == "russian_mafia":
+            from bot.russian_mafia import HOST_HELPER_MODE, PLAYER_COUNTS
+
+            if max_players not in PLAYER_COUNTS:
+                return None
+            if bazpors_host_mode not in (None, HOST_HELPER_MODE):
+                return None
         else:
             need = self.required_players_for_scenario(scenario_key)
             if max_players < need or max_players > 50:
@@ -897,6 +931,8 @@ class GameManager:
         elif scenario_key == "mozakere" and bazpors_host_mode:
             game.bazpors_host_mode = bazpors_host_mode
         elif scenario_key == "masoon" and bazpors_host_mode:
+            game.bazpors_host_mode = bazpors_host_mode
+        elif scenario_key == "russian_mafia" and bazpors_host_mode:
             game.bazpors_host_mode = bazpors_host_mode
         self.games[code] = game
         self.host_to_room[host_id] = code
@@ -1023,6 +1059,16 @@ class GameManager:
             return "creator_not_player"
         return self._fill_bazpors_synthetic_preserving_real_players(game)
 
+    def fill_russian_mafia_synthetic_lobby(self, game: Game) -> str | None:
+        """جای خالی مافیای روسی را با همان بازیکن ساختگی لابی پر می‌کند."""
+        if game.scenario_name != "russian_mafia" or game.bazpors_host_mode != "host_helper":
+            return "not_russian_host_helper"
+        if game.phase != Phase.LOBBY:
+            return "not_lobby"
+        if game.seats_finalized or game.roles_dealt:
+            return "past_lobby"
+        return self._fill_bazpors_synthetic_preserving_real_players(game)
+
     def fill_bazpors_no_host_synthetic_lobby(self, game: Game) -> str | None:
         """سازگاری با نام قبلی — فقط بازپرس."""
         if game.scenario_name != "bazpors" or game.bazpors_host_mode != "no_host":
@@ -1089,6 +1135,7 @@ class GameManager:
             "masoon2",
             "masoon",
             "namayande",
+            "russian_mafia",
         ):
             if n != game.max_players:
                 label = self.scenario_display_name(game.scenario_name)
@@ -1427,8 +1474,12 @@ class GameManager:
         if len(key) != 4 or not key.isdigit():
             return None
         for game in self.games.values():
+            allowed = game.bazpors_host_mode == "no_host" or (
+                game.scenario_name == "russian_mafia"
+                and game.bazpors_host_mode == "host_helper"
+            )
             if (
-                game.bazpors_host_mode == "no_host"
+                allowed
                 and game.observer_code == key
                 and game.phase != Phase.ENDED
             ):
@@ -1443,7 +1494,11 @@ class GameManager:
         full_name: str,
         username: str | None,
     ) -> str | None:
-        if game.bazpors_host_mode != "no_host":
+        allowed_observer_room = game.bazpors_host_mode == "no_host" or (
+            game.scenario_name == "russian_mafia"
+            and game.bazpors_host_mode == "host_helper"
+        )
+        if not allowed_observer_room:
             return "not_no_host"
         if game.observer_prompt_status == "skipped":
             return "skipped"
@@ -1467,6 +1522,12 @@ class GameManager:
         return None
 
     def end_game(self, room_code: str) -> None:
+        try:
+            from bot.mason_night_reminder import cancel_mason_night_reminder_task
+
+            cancel_mason_night_reminder_task(room_code)
+        except Exception:
+            pass
         game = self.games.get(room_code)
         if not game:
             return
@@ -1639,6 +1700,11 @@ class GameManager:
         if game.scenario_name == "namayande":
             self._assign_roles_namayande(game)
             return
+        if game.scenario_name == "russian_mafia":
+            from bot.russian_mafia_flow import assign_roles_on_game
+
+            assign_roles_on_game(game)
+            return
 
         player_ids = list(game.players.keys())
         random.shuffle(player_ids)
@@ -1737,6 +1803,13 @@ class GameManager:
             if is_mafia_team(role):
                 game.mafia_ids.add(pid)
         self._sync_mozakere_synthetic_player_display_names(game)
+
+    def assign_russian_mafia_roles_by_player(
+        self, game: Game, role_by_player: dict[int, Role]
+    ) -> None:
+        from bot.russian_mafia_flow import assign_roles_on_game
+
+        assign_roles_on_game(game, role_by_player)
 
     def assign_mason_roles_by_player(
         self, game: Game, role_by_player: dict[int, Role]

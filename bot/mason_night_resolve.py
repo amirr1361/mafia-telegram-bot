@@ -91,3 +91,9 @@ def apply_mason_night_resolution(game: Game, gm: "GameManager") -> None:
 
     gm.check_winner(game)
     game.mason_night_resolution_applied = True
+    try:
+        from bot.mason_final_outcome import record_mason_final_night_outcome
+
+        record_mason_final_night_outcome(game, gm)
+    except Exception:
+        pass

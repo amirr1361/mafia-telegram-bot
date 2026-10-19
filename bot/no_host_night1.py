@@ -244,6 +244,8 @@ async def on_no_host_entered_night1(bot: Bot, game: Game, gm: "GameManager") -> 
 
 
 async def on_no_host_entered_night(bot: Bot, game: Game, gm: "GameManager") -> None:
+    if getattr(game, "scenario_name", None) == "russian_mafia":
+        return
     from bot.room_mode import is_mason_scenario
 
     if is_mason_scenario(game):

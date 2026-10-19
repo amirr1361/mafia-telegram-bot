@@ -546,6 +546,11 @@ async def myname_cmd(msg: Message) -> None:
         )
 
 
+def panic_restart_directory() -> Path:
+    """ریشهٔ مخزن (حاوی بستهٔ bot)، نه خود پوشهٔ bot."""
+    return Path(__file__).resolve().parents[2]
+
+
 @router.message(_panic_trigger_message_filter)
 async def mafia_panic_trigger(msg: Message) -> None:
     assert msg.from_user is not None
@@ -591,10 +596,17 @@ async def mafia_panic_password(msg: Message, bot: Bot) -> None:
         "فرایند ربات دوباره اجرا می‌شود…",
         parse_mode="HTML",
     )
-    # مهم: همیشه از ریشهٔ پروژه و به صورت ماژول ری‌استارت می‌کنیم تا importهای
-    # `from bot...` درست resolve شوند و اجرای مستقیم `bot/py` رخ ندهد.
-    os.chdir(Path(__file__).resolve().parent.parent)
-    os.execv(sys.executable, [sys.executable, "-m", "bot.main"])
+    # cwd باید ریشهٔ مخزن باشد. parent.parent این فایل پوشهٔ بستهٔ bot است و
+    # `python -m bot.main` از آنجا ModuleNotFoundError می‌دهد. systemd فقط در
+    # شروع اولیه WorkingDirectory را اعمال می‌کند؛ execv همان cwd فرایند را نگه می‌دارد.
+    repo_root = panic_restart_directory()
+    os.chdir(repo_root)
+    env = os.environ.copy()
+    previous = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(repo_root) if not previous else str(repo_root) + os.pathsep + previous
+    )
+    os.execve(sys.executable, [sys.executable, "-m", "bot.main"], env)
 
 
 @router.message(_myname_waiting_filter)

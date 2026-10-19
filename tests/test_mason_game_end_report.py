@@ -80,20 +80,23 @@ class MasonGameEndTimelineTests(unittest.TestCase):
         game.bazpors_alive_at_night_start = alive_snap
         apply_mason_night_resolution(game, self.gm)
         report_html = _compose_full_night_report(game, self.gm, alive_snap)
+        from bot.mason_final_outcome import find_mason_final_night_outcome
+
+        mason_outcome = find_mason_final_night_outcome(game, 1)
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
         ) as f:
             log_path = Path(f.name)
+            payload = {
+                "event": "night.resolved",
+                "night_report_html": report_html,
+                "bazpors": {"night_count": 1, "host_day": 1},
+            }
+            if mason_outcome is not None:
+                payload["mason_final_outcome"] = dict(mason_outcome)
             f.write(
-                json.dumps(
-                    {
-                        "event": "night.resolved",
-                        "night_report_html": report_html,
-                        "bazpors": {"night_count": 1, "host_day": 1},
-                    },
-                    ensure_ascii=False,
-                )
+                json.dumps(payload, ensure_ascii=False)
                 + "\n"
             )
             f.write(

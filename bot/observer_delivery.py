@@ -60,8 +60,17 @@ def unpack_player_mirror_cb(data: str) -> PlayerMirrorCb | None:
         return None
 
 
+def _russian_observer_mirror(game: Game) -> bool:
+    return (
+        getattr(game, "scenario_name", None) == "russian_mafia"
+        and getattr(game, "bazpors_host_mode", None) == "host_helper"
+        and game.observer_user_id is not None
+        and game.observer_prompt_status != "skipped"
+    )
+
+
 def game_observer_mirror_active(game: Game) -> bool:
-    return no_host_observer_registered(game)
+    return no_host_observer_registered(game) or _russian_observer_mirror(game)
 
 
 def no_host_observer_registered(game: Game) -> bool:
@@ -92,7 +101,9 @@ def _coerce_mirror_delivery(
     send_player: bool,
     send_observer: bool,
 ) -> tuple[bool, bool]:
-    if not no_host_player_moderator_path(game):
+    if not (
+        no_host_player_moderator_path(game) or _russian_observer_mirror(game)
+    ):
         return send_player, send_observer
     if _seat_uid_is_observer(game, player_uid):
         return send_player, False
@@ -101,7 +112,9 @@ def _coerce_mirror_delivery(
 
 def _must_mirror_ui_to_observer(game: Game, player_uid: int) -> bool:
     return (
-        no_host_player_moderator_path(game)
+        (
+            no_host_player_moderator_path(game) or _russian_observer_mirror(game)
+        )
         and not _seat_uid_is_observer(game, player_uid)
     )
 
@@ -127,9 +140,22 @@ def build_observer_players_roster_html(game: Game, gm: "GameManager") -> str:
         return "\n".join(lines)
     if not game.roles_dealt:
         lines.append("<i>نقش‌ها هنوز پخش نشده‌اند.</i>\n")
+    russian = game.scenario_name == "russian_mafia"
+    russian_label = None
+    fa_digits = None
+    if russian:
+        from bot.russian_mafia import russian_role_label_fa as russian_label
+        from bot.text_fa import fa_digits as fa_digits
     for p in players:
         tag = html.escape(gm.format_player_tag(p))
-        if p.role is not None:
+        if russian:
+            seat = fa_digits(p.seat) if p.seat is not None else "—"
+            if p.role is not None:
+                role_txt = html.escape(russian_label(p.role))
+                lines.append(f"• صندلی {seat} — {tag} — <b>{role_txt}</b>")
+            else:
+                lines.append(f"• صندلی {seat} — {tag} — <i>نقش نامشخص</i>")
+        elif p.role is not None:
             role_txt = html.escape(role_label_fa(p.role))
             lines.append(f"• {tag} — <b>{role_txt}</b>")
         else:
@@ -145,10 +171,29 @@ async def send_observer_players_roster(
     """ارسال فهرست بازیکنان و نقش‌ها فقط به ناظر."""
     if game.observer_user_id is None:
         return
+    if (
+        game.scenario_name == "russian_mafia"
+        and game.russian_mafia_observer_roster_sent
+    ):
+        logger.info(
+            "Russian Mafia room=%s observer roster already sent; skipping duplicate",
+            game.room_code,
+        )
+        return
     text = build_observer_players_roster_html(game, gm)
-    await safe_send_message(
+    sent = await safe_send_message(
         bot, game.observer_user_id, text, parse_mode="HTML"
     )
+    if game.scenario_name == "russian_mafia" and sent:
+        seated = [pl for pl in game.players.values() if pl.role != Role.OBSERVER]
+        assigned = sum(1 for pl in seated if pl.role is not None)
+        game.russian_mafia_observer_roster_sent = True
+        logger.info(
+            "Russian Mafia observer roster sent room=%s players=%s assigned_roles=%s",
+            game.room_code,
+            len(seated),
+            assigned,
+        )
 
 
 async def notify_no_host_observer(
@@ -309,7 +354,9 @@ async def notify_eliminated_player(bot: Bot, game: Game, uid: int) -> None:
     body = ELIMINATED_PLAYER_MESSAGE_HTML
     if extra:
         body = f"{body}\n\n{extra}"
-    await safe_send_message(bot, uid, body, parse_mode="HTML")
+    russian = game.scenario_name == "russian_mafia"
+    if not (russian and is_synthetic_player_uid(uid)):
+        await safe_send_message(bot, uid, body, parse_mode="HTML")
     if no_host_observer_registered(game):
         await mirror_per_player_to_observer(
             bot,
@@ -318,6 +365,46 @@ async def notify_eliminated_player(bot: Bot, game: Game, uid: int) -> None:
             body,
             parse_mode="HTML",
         )
+    elif russian:
+        from bot.russian_mafia import russian_mafia_observer_registered
+
+        if russian_mafia_observer_registered(game):
+            observer = game.observer_user_id
+            if observer is not None and observer != uid:
+                await safe_send_message(
+                    bot,
+                    observer,
+                    observer_player_copy_prefix(game, uid) + body,
+                    parse_mode="HTML",
+                )
+
+    try:
+        from bot.room_mode import is_mason_scenario, is_mozakere_scenario
+
+        if game.scenario_name == "russian_mafia":
+            from bot.russian_mafia_elim_report import (
+                maybe_send_russian_mafia_elim_report_invite,
+            )
+
+            await maybe_send_russian_mafia_elim_report_invite(bot, game, uid)
+        elif is_mozakere_scenario(game):
+            from bot.mozakere_elim_report import maybe_send_mozakere_elim_report_invite
+
+            await maybe_send_mozakere_elim_report_invite(bot, game, uid)
+        elif is_mason_scenario(game):
+            from bot.mason_elim_report import maybe_send_mason_elim_report_invite
+
+            await maybe_send_mason_elim_report_invite(bot, game, uid)
+        else:
+            from bot.bazpors_elim_report import (
+                is_bazpors_elim_report_scenario,
+                maybe_send_bazpors_elim_report_invite,
+            )
+
+            if is_bazpors_elim_report_scenario(game):
+                await maybe_send_bazpors_elim_report_invite(bot, game, uid)
+    except Exception:
+        pass
 
 
 async def flush_elimination_notifications(bot: Bot, game: Game) -> None:
@@ -434,7 +521,10 @@ async def _send_observer_mirror_ref(
     parse_mode: str = "HTML",
     **kwargs: Any,
 ) -> bool:
-    if not no_host_observer_registered(game):
+    russian_mirror_key = _russian_observer_mirror(game) and (
+        "defense" in ui_key or ":obs" in ui_key
+    )
+    if not (no_host_observer_registered(game) or russian_mirror_key):
         return False
     obs_id = game.observer_user_id
     if obs_id is None or obs_id == player_uid:

@@ -69,6 +69,7 @@ from bot.room_mode import (
     is_mason_scenario,
     is_mozakere_scenario,
     is_no_host_player_room,
+    is_russian_mafia_host_helper_room,
     narrator_assist_after_roles_dealt,
     no_host_bot_assistant_flow_enabled,
     players_receive_post_deal_hub_message,
@@ -515,11 +516,29 @@ def scenario_menu_keyboard() -> InlineKeyboardMarkup:
                     callback_data=CreatePickScenario(slug="mozakere").pack(),
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    text="🕶 مافیای روسی",
+                    callback_data=CreatePickScenario(slug="russian_mafia").pack(),
+                ),
+            ],
         ]
     )
 
 
 def player_count_keyboard(slug: str) -> InlineKeyboardMarkup:
+    if slug == "russian_mafia":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"{n} بازیکن",
+                        callback_data=CreatePickPlayers(slug=slug, count=n).pack(),
+                    )
+                    for n in (8, 9)
+                ]
+            ]
+        )
     if slug == "bazpors_salamat_test":
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -1275,6 +1294,14 @@ def _private_role_spoiler_html(text: str, *, min_chars: int = 0) -> str:
 def build_private_role_message_html(
     game: Game | None, role: Role, *, with_role_card: bool = False
 ) -> str:
+    if game is not None and game.scenario_name == "russian_mafia":
+        from bot.russian_mafia import russian_role_description_fa, russian_role_label_fa
+
+        label = russian_role_label_fa(role)
+        return (
+            "🎭 نقش شما: <b>" + html.escape(label) + "</b>\n"
+            + html.escape(russian_role_description_fa(role, game))
+        )
     if game is not None and is_mozakere_scenario(game):
         from bot.mozakere_role_descriptions import mozakere_role_description_fa
 
@@ -1341,7 +1368,11 @@ async def send_private_role(
     card_path = (
         None
         if game is not None
-        and (is_mozakere_scenario(game) or is_mason_scenario(game))
+        and (
+            is_mozakere_scenario(game)
+            or is_mason_scenario(game)
+            or game.scenario_name == "russian_mafia"
+        )
         else role_card_image_path(role)
     )
     msg = build_private_role_message_html(
@@ -1487,18 +1518,25 @@ def build_no_host_bot_assistant_prompt_html() -> str:
     )
 
 
+def _assistant_pick_room(game: Game) -> bool:
+    return no_host_bot_assistant_flow_enabled(game) or is_russian_mafia_host_helper_room(
+        game
+    )
+
+
 def _no_host_bot_assistant_candidate_uids(game: Game) -> list[int]:
-    if not no_host_bot_assistant_flow_enabled(game):
+    if not _assistant_pick_room(game):
         return []
+    observer_id = game.observer_user_id
     return [
         uid
         for uid in game.players
-        if not is_synthetic_player_uid(uid)
+        if not is_synthetic_player_uid(uid) and uid != observer_id
     ]
 
 
 def pick_random_no_host_bot_assistant(game: Game) -> int | None:
-    if not no_host_bot_assistant_flow_enabled(game):
+    if not _assistant_pick_room(game):
         return None
     candidates = _no_host_bot_assistant_candidate_uids(game)
     if not candidates:
@@ -2168,7 +2206,7 @@ def _no_host_day1_defense_actor_may_act(
     if actor_uid == assistant_uid:
         return True
     return (
-        no_host_observer_registered(game)
+        game_observer_mirror_active(game)
         and game.observer_user_id == actor_uid
     )
 
@@ -2633,6 +2671,9 @@ async def _no_host_day1_defense_confirm(
     }
     set_day_vote_defender_uids(game, picked)
     set_day_vote_pick_uids(game, set())
+    from bot.russian_mafia_flow import note_russian_defense_candidates
+
+    note_russian_defense_candidates(game, picked)
     game.no_host_day1_defense_phase = "outcome"
     await callback.answer("ثبت شد.")
     pick_key = _no_host_day1_defense_pick_ui_key(game, assistant_uid)
@@ -2719,6 +2760,12 @@ async def _no_host_day1_defense_no_votes(
         parse_mode="HTML",
         is_synthetic_uid=is_synthetic_player_uid,
     )
+    from bot.russian_mafia_flow import apply_russian_day_result
+
+    if await apply_russian_day_result(
+        bot, game, eliminated_uid=None, reason="none"
+    ):
+        return
     no_host_day1_defense_no_votes_enter_night(game)
     await on_no_host_entered_night1(bot, game, manager)
     try:
@@ -2789,6 +2836,12 @@ async def _no_host_day1_defense_outcome_no_exit(
         parse_mode="HTML",
         is_synthetic_uid=is_synthetic_player_uid,
     )
+    from bot.russian_mafia_flow import apply_russian_day_result
+
+    if await apply_russian_day_result(
+        bot, game, eliminated_uid=None, reason="no_exit"
+    ):
+        return
     no_host_day1_no_exit_enter_night(game)
     await on_no_host_entered_night1(bot, game, manager)
     try:
@@ -2907,6 +2960,12 @@ async def _no_host_day1_defense_confirm_elim_yes(
         ):
             return
         await apply_mirror_claim_winner(bot, game, ui_key, actor_uid, assistant_uid)
+    from bot.russian_mafia_flow import finish_russian_confirmed_elimination
+
+    if await finish_russian_confirmed_elimination(
+        callback, bot, game, assistant_uid, target_uid
+    ):
+        return
     from bot.bazpors_narrator import hunter_chain_confirm_alert_text
 
     chain_alert = hunter_chain_confirm_alert_text(
@@ -3181,8 +3240,9 @@ async def register_observer_via_command(
             from bot.no_host_night_sage_quote import resync_observer_night_sage_quotes
 
             await send_observer_players_roster(bot, game, manager)
-            await resync_observer_night_sage_quotes(bot, game)
-            await resync_observer_night_entry_panels(bot, game, manager)
+            if game.bazpors_host_mode == "no_host":
+                await resync_observer_night_sage_quotes(bot, game)
+                await resync_observer_night_entry_panels(bot, game, manager)
             room = html.escape(game.room_code)
             await msg.answer(
                 f"شما قبلاً ناظر اتاق <code>{room}</code> بودید.\n"
@@ -3215,11 +3275,12 @@ async def register_observer_via_command(
         parse_mode="HTML",
     )
     await send_observer_players_roster(bot, game, manager)
-    from bot.no_host_night_entry import resync_observer_night_entry_panels
-    from bot.no_host_night_sage_quote import resync_observer_night_sage_quotes
+    if game.bazpors_host_mode == "no_host":
+        from bot.no_host_night_entry import resync_observer_night_entry_panels
+        from bot.no_host_night_sage_quote import resync_observer_night_sage_quotes
 
-    await resync_observer_night_sage_quotes(bot, game)
-    await resync_observer_night_entry_panels(bot, game, manager)
+        await resync_observer_night_sage_quotes(bot, game)
+        await resync_observer_night_entry_panels(bot, game, manager)
     try:
         await bot.send_message(
             game.host_id,
@@ -3242,7 +3303,12 @@ async def register_observer_via_command(
         pass
     if no_host_bot_assistant_flow_enabled(game) and game.bot_assistant_user_id is not None:
         if game.no_host_intro_night_started:
-            await deliver_no_host_intro_night_started_messages(bot, game)
+            if is_mason_scenario(game):
+                from bot.mason_intro_flow import deliver_mason_intro_night_started_messages
+
+                await deliver_mason_intro_night_started_messages(bot, game)
+            else:
+                await deliver_no_host_intro_night_started_messages(bot, game)
         else:
             await send_no_host_intro_night_start_prompt(bot, game, observer_only=True)
 
@@ -3998,6 +4064,16 @@ def _build_bazpors_timeline_html(snap: dict[str, object]) -> str:
                 night_no = len(night_events) + 1
             report_html = str(rec.get("night_report_html") or "")
             lines = _night_lines_from_report_html(report_html)
+            if scenario == "masoon":
+                from bot.mason_final_outcome import (
+                    append_mason_outcome_to_timeline_lines,
+                )
+
+                outcome = rec.get("mason_final_outcome")
+                if isinstance(outcome, dict):
+                    lines = append_mason_outcome_to_timeline_lines(
+                        lines, outcome, tag_for_uid
+                    )
             if lines:
                 night_events[night_no] = lines
             continue
@@ -4334,7 +4410,7 @@ def host_deal_roles_keyboard(game: Game) -> InlineKeyboardMarkup:
             ),
         ]
     ]
-    if game.scenario_name in ("bazpors", "mozakere", "masoon"):
+    if game.scenario_name in ("bazpors", "mozakere", "masoon", "russian_mafia"):
         rows.append(
             [
                 InlineKeyboardButton(
@@ -4364,6 +4440,8 @@ def host_seat_confirm_keyboard(game: Game) -> InlineKeyboardMarkup:
 
 
 def _host_shuffle_hides_player_names(game: Game) -> bool:
+    if is_russian_mafia_host_helper_room(game):
+        return True
     return is_no_host_player_room(game) or is_bazpors_semi_auto_room(game)
 
 
@@ -4516,7 +4594,9 @@ async def deliver_seat_assignments(bot: Bot, game: Game) -> list[str]:
         if p is None:
             continue
         try:
-            if observer_once:
+            if is_russian_mafia_host_helper_room(game):
+                ok = await safe_send_message(bot, uid, seat_text)
+            elif observer_once:
                 ok = (
                     await safe_send_message_return(bot, p.user_id, seat_text)
                 ) is not None
@@ -5109,6 +5189,10 @@ async def finalize_roles_deal_pipeline(bot: Bot, game: Game) -> None:
     await notify_players_after_roles_dealt(bot, game)
     if is_no_host_player_room(game):
         await send_no_host_observer_prompt(bot, game)
+    elif game.scenario_name == "russian_mafia":
+        from bot.russian_mafia_flow import begin_after_roles
+
+        await begin_after_roles(bot, game)
 
 
 async def _do_join(msg: Message, bot: Bot, code: str) -> JoinFlowResult:
@@ -5432,6 +5516,24 @@ async def main() -> None:
     db.init_db()
     manager.load_user_display_names_from_db()
     restored = manager.restore_active_games_from_db()
+    try:
+        from bot.mason_night_reminder import (
+            invalidate_mason_night_reminders_on_restore,
+            clear_mason_night_reminder_state,
+        )
+        from bot.room_mode import is_mason_scenario
+
+        invalidate_mason_night_reminders_on_restore()
+        for code in restored:
+            g = manager.get_game(code)
+            if g is None or not is_mason_scenario(g):
+                continue
+            g.mason_night_reminder_generation = (
+                int(g.mason_night_reminder_generation or 0) + 1
+            )
+            clear_mason_night_reminder_state(g)
+    except Exception:
+        logger.exception("mason night reminder restore invalidate failed")
     if restored:
         logger.info(
             "Restored %d active game(s) from snapshot: %s",
@@ -5439,6 +5541,19 @@ async def main() -> None:
             ", ".join(restored),
         )
     bot = Bot(token=get_token())
+    if restored:
+        from bot.russian_mafia_flow import reissue_open_russian_action_panels
+
+        for code in list(restored):
+            restored_game = manager.get_game(code)
+            if restored_game is None:
+                continue
+            try:
+                await reissue_open_russian_action_panels(bot, restored_game)
+            except Exception:
+                logger.exception(
+                    "Russian panel reissue failed room=%s", code
+                )
     await bot.set_my_commands(
         build_bot_menu_commands(),
         scope=BotCommandScopeAllPrivateChats(),

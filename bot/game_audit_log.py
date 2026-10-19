@@ -238,12 +238,22 @@ def log_player_eliminated(
 
 
 def log_night_resolved(game: Game, gm: GameManager | None = None) -> None:
-    log_event(
-        game,
-        "night.resolved",
-        bazpors=bazpors_snapshot(game),
-        night_report_html=game.bazpors_night_report_html,
-    )
+    payload: dict[str, object] = {
+        "bazpors": bazpors_snapshot(game),
+        "night_report_html": game.bazpors_night_report_html,
+    }
+    try:
+        from bot.room_mode import is_mason_scenario
+
+        if is_mason_scenario(game):
+            from bot.mason_final_outcome import record_mason_final_night_outcome
+
+            entry = record_mason_final_night_outcome(game, gm)
+            if entry is not None:
+                payload["mason_final_outcome"] = dict(entry)
+    except Exception:
+        pass
+    log_event(game, "night.resolved", **payload)
     if gm is not None:
         gm.persist_snapshot(game, reason="night_resolved")
 
