@@ -19,12 +19,17 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest
 
 from bot.async_broadcast import gather_bounded
-from bot.game import is_synthetic_player_uid, role_label_fa
+from bot.game import (
+    is_synthetic_player_uid,
+    role_label_fa,
+    scenario_role_label_fa,
+)
 from bot.models import Game, Role
 from bot.text_fa import fa_digits
 from bot.tg_send import safe_send_message, safe_send_message_return
 if TYPE_CHECKING:
     from bot.game import GameManager
+from bot.room_mode import is_namayande10_no_host_room
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +80,13 @@ def game_observer_mirror_active(game: Game) -> bool:
 
 def no_host_observer_registered(game: Game) -> bool:
     """ناظر فعال = شناسه ثبت شده و لغو نشده (نه فقط status==registered)."""
+    from bot.room_mode import is_namayande10_no_host_room
+
+    no_host_room = game.bazpors_host_mode == "no_host" or is_namayande10_no_host_room(
+        game
+    )
     return (
-        game.bazpors_host_mode == "no_host"
+        no_host_room
         and game.observer_user_id is not None
         and game.observer_prompt_status != "skipped"
     )
@@ -156,7 +166,12 @@ def build_observer_players_roster_html(game: Game, gm: "GameManager") -> str:
             else:
                 lines.append(f"• صندلی {seat} — {tag} — <i>نقش نامشخص</i>")
         elif p.role is not None:
-            role_txt = html.escape(role_label_fa(p.role))
+            label = role_label_fa
+            if is_namayande10_no_host_room(game):
+                from bot.nam10.role_labels import nam10_role_label_fa
+
+                label = nam10_role_label_fa
+            role_txt = html.escape(label(p.role))
             lines.append(f"• {tag} — <b>{role_txt}</b>")
         else:
             lines.append(f"• {tag} — <i>نقش نامشخص</i>")
@@ -355,9 +370,14 @@ async def notify_eliminated_player(bot: Bot, game: Game, uid: int) -> None:
     if extra:
         body = f"{body}\n\n{extra}"
     russian = game.scenario_name == "russian_mafia"
+    direct_sent = False
     if not (russian and is_synthetic_player_uid(uid)):
-        await safe_send_message(bot, uid, body, parse_mode="HTML")
+        direct_sent = bool(
+            await safe_send_message(bot, uid, body, parse_mode="HTML")
+        )
+    no_host_mirror_attempted = False
     if no_host_observer_registered(game):
+        no_host_mirror_attempted = True
         await mirror_per_player_to_observer(
             bot,
             game,
@@ -379,6 +399,22 @@ async def notify_eliminated_player(bot: Bot, game: Game, uid: int) -> None:
                 )
 
     try:
+        from bot.game_audit_log import log_event
+
+        log_event(
+            game,
+            "elim.notify",
+            uid=uid,
+            scenario=game.scenario_name,
+            synthetic=is_synthetic_player_uid(uid),
+            direct_sent=direct_sent,
+            no_host_mirror_attempted=no_host_mirror_attempted,
+            observer_uid=game.observer_user_id,
+        )
+    except Exception:
+        pass
+
+    try:
         from bot.room_mode import is_mason_scenario, is_mozakere_scenario
 
         if game.scenario_name == "russian_mafia":
@@ -396,6 +432,15 @@ async def notify_eliminated_player(bot: Bot, game: Game, uid: int) -> None:
 
             await maybe_send_mason_elim_report_invite(bot, game, uid)
         else:
+            from bot.room_mode import is_namayande10_no_host_room
+
+            if is_namayande10_no_host_room(game):
+                from bot.nam10.no_host_elim_report import (
+                    maybe_send_nam10_elim_report_invite,
+                )
+
+                await maybe_send_nam10_elim_report_invite(bot, game, uid)
+                return
             from bot.bazpors_elim_report import (
                 is_bazpors_elim_report_scenario,
                 maybe_send_bazpors_elim_report_invite,
@@ -421,9 +466,12 @@ def _format_player_tag(game: Game, uid: int) -> str:
     p = game.players.get(uid)
     if not p:
         return f"#{uid}"
-    if p.username:
-        return f"@{p.username}"
-    return p.full_name
+    from bot.app_state import custom_display_name
+
+    custom = custom_display_name(uid)
+    if custom is not None:
+        return custom
+    return p.full_name or (f"@{p.username}" if p.username else f"#{uid}")
 
 
 def observer_player_copy_prefix(game: Game, as_player_uid: int) -> str:
@@ -432,7 +480,7 @@ def observer_player_copy_prefix(game: Game, as_player_uid: int) -> str:
     seat_txt = fa_digits(seat) if seat is not None else "—"
     tag = html.escape(_format_player_tag(game, as_player_uid))
     if p is not None and p.role is not None:
-        role_txt = html.escape(role_label_fa(p.role))
+        role_txt = html.escape(scenario_role_label_fa(game, p.role))
     else:
         role_txt = "نقش نامشخص"
     return (
@@ -479,6 +527,12 @@ def _mirror_observer_body(
     return observer_player_copy_prefix(game, player_uid) + text
 
 
+def _is_not_modified_error(exc: BaseException) -> bool:
+    """True for Telegram's harmless no-op edit rejection."""
+    text = str(exc).lower()
+    return "message is not modified" in text or "not modified" in text
+
+
 async def _try_edit_mirror_message(
     bot: Bot,
     chat_id: int,
@@ -497,7 +551,21 @@ async def _try_edit_mirror_message(
             reply_markup=reply_markup,
         )
         return True
-    except TelegramBadRequest:
+    except TelegramBadRequest as text_exc:
+        if _is_not_modified_error(text_exc):
+            # Identical text is not a failure: the message already shows
+            # exactly this body. Still allow a markup-only diff to be
+            # applied, and treat a fully identical no-op as success so
+            # callers do not compensate with a duplicate fresh copy.
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=reply_markup,
+                )
+                return True
+            except TelegramBadRequest as markup_exc:
+                return _is_not_modified_error(markup_exc)
         try:
             await bot.edit_message_reply_markup(
                 chat_id=chat_id,

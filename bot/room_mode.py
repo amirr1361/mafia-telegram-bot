@@ -20,6 +20,23 @@ def is_bazpors_no_host_room(game: Game) -> bool:
     )
 
 
+def is_namayande10_no_host_room(game: Game) -> bool:
+    """نماینده ۱۰ نفره — fork مستقل no-host (snapshot بازپرس؛ state جدا با nmnd_*)."""
+    return (
+        game.scenario_name == "namayande"
+        and game.nmnd_host_mode == "no_host"
+    )
+
+
+def is_namayande10_semi_auto_room(game: Game) -> bool:
+    """Namayande-10 fork - after a no-host handoff transferred to semi_auto
+    (state stays in nmnd_* fields; the shared narrator step machines run)."""
+    return (
+        game.scenario_name == "namayande"
+        and game.nmnd_host_mode == "semi_auto"
+    )
+
+
 def no_host_bot_assistant_flow_enabled(game: Game) -> bool:
     """کمک‌کننده ربات — بازپرس یا مذاکرهٔ بازیکن‌گرداننده."""
     return is_no_host_player_room(game)
@@ -69,11 +86,12 @@ def is_mason_no_host_room(game: Game) -> bool:
 
 
 def is_no_host_player_room(game: Game) -> bool:
-    """بازپرس، مذاکره یا ماسون — سازنده در صندلی و لابی مشترک no_host."""
+    """بازپرس، مذاکره، ماسون یا نماینده ۱۰ نفره — سازنده در صندلی و لابی مشترک no_host."""
     return (
         is_bazpors_no_host_room(game)
         or is_mozakere_no_host_room(game)
         or is_mason_no_host_room(game)
+        or is_namayande10_no_host_room(game)
     )
 
 
@@ -91,6 +109,7 @@ def lobby_dev_fill_enabled(game: Game) -> bool:
         bazpors_lobby_dev_fill_enabled(game)
         or is_mozakere_no_host_room(game)
         or is_mason_no_host_room(game)
+        or is_namayande10_no_host_room(game)
         or is_russian_mafia_host_helper_room(game)
     )
 

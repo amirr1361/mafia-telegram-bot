@@ -24,6 +24,11 @@ from bot.no_host_mafia_night1 import (
     MAFIA_ACTION_NATO,
     notify_all_alive_mafia_team,
 )
+from bot.no_host_role_pick_common import (
+    append_pending_selection_line,
+    apply_bazpors_panel_styles,
+    with_inline_confirm_row,
+)
 from bot.observer_delivery import (
     PlayerMirrorCb,
     apply_mirror_claim_winner,
@@ -158,17 +163,21 @@ def build_no_host_nato_mafia_summary_html(
 
 
 def _nato_denied_keyboard(game: Game, mafia_uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="↩️ بازگشت به مرحله قبل",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="nmb", as_uid=mafia_uid
-                    ).pack(),
-                )
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="↩️ بازگشت به مرحله قبل",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act="nmb", as_uid=mafia_uid
+                        ).pack(),
+                    )
+                ]
             ]
-        ]
+        ),
+        ok_acts={"nmb"},
     )
 
 
@@ -213,32 +222,60 @@ def _parse_nato_role_act(act: str) -> str | None:
 def _confirm_keyboard(
     game: Game, nato_uid: int, confirm_act: str, back_act: str
 ) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔹 بله، تأیید انتخاب",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act=confirm_act, as_uid=nato_uid
-                    ).pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔹 بازگشت و تصحیح انتخاب",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act=back_act, as_uid=nato_uid
-                    ).pack(),
-                )
-            ],
-        ]
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔹 بله، تأیید انتخاب",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act=confirm_act, as_uid=nato_uid
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🔹 بازگشت و تصحیح انتخاب",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act=back_act, as_uid=nato_uid
+                        ).pack(),
+                    )
+                ],
+            ]
+        ),
+        ok_acts={confirm_act, back_act},
     )
 
 
+def _nato_role_pending_line(game: Game) -> str:
+    role_val = game.no_host_mafia_nato_pending_role
+    if role_val:
+        try:
+            return (
+                "🎭 انتخاب فعلی: <b>"
+                + html.escape(role_label_fa(Role(role_val)))
+                + "</b>"
+            )
+        except ValueError:
+            pass
+    return "🎭 انتخاب فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
+
+
+def _nato_player_pending_line(game: Game, gm: "GameManager") -> str:
+    tid = game.no_host_mafia_nato_pending_target_uid
+    if tid is not None:
+        p = game.players.get(tid)
+        tag = html.escape(gm.format_player_tag(p) if p else str(tid))
+        return f"👤 انتخاب فعلی: <b>{tag}</b>"
+    return "👤 انتخاب فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
+
+
 def _role_pick_keyboard(game: Game, nato_uid: int) -> InlineKeyboardMarkup:
+    guess_roles = _nato_guess_roles_in_room(game)
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
-    for role in _nato_guess_roles_in_room(game):
+    for role in guess_roles:
         label = role_label_fa(role)[:28]
         cb = PlayerMirrorCb(
             code=game.room_code,
@@ -251,7 +288,20 @@ def _role_pick_keyboard(game: Game, nato_uid: int) -> InlineKeyboardMarkup:
             row = []
     if row:
         rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    ok_acts = {f"n1r-{role.value}" for role in guess_roles}
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    if game.scenario_name == "bazpors":
+        # بازپرس — نقش انتخابی قرمز، بقیه آبی + تأیید سبز از رندر اولیه.
+        pending = game.no_host_mafia_nato_pending_role
+        kb = apply_bazpors_panel_styles(
+            game,
+            kb,
+            ok_acts=ok_acts,
+            selected_acts={f"n1r-{pending}"} if pending else set(),
+        )
+        kb = with_inline_confirm_row(game, nato_uid, kb, confirm_act="n1c")
+        return kb
+    return apply_bazpors_panel_styles(game, kb, ok_acts=ok_acts)
 
 
 def _player_pick_keyboard(
@@ -273,7 +323,24 @@ def _player_pick_keyboard(
             row = []
     if row:
         rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    pending_target = game.no_host_mafia_nato_pending_target_uid
+    kb = apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(inline_keyboard=rows),
+        pick_acts={"n2p"},
+        selected_uids=[pending_target] if pending_target is not None else [],
+    )
+    if game.scenario_name == "bazpors":
+        # تأیید سبز از رندر اولیه — مرحلهٔ انتخاب بازیکن با تأیید نهایی می‌بندد.
+        kb = with_inline_confirm_row(game, nato_uid, kb, confirm_act="n2c")
+    return kb
+
+
+def _nato_pending_role_val(game: Game) -> str:
+    """نقش تأییدشدهٔ مرحلهٔ اول ناتو — برای بازسازی متن دکمه‌ها."""
+    if is_mason_scenario(game):
+        return game.mason_nato_pending_role or ""
+    return game.no_host_mafia_nato_pending_role or game.bazpors_nato_guess_role or ""
 
 
 def _actor_may_use_nato_panel(game: Game, actor_uid: int, nato_uid: int) -> bool:
@@ -499,6 +566,24 @@ async def dispatch_no_host_mafia_nato(
             await callback.answer("این نقش در اتاق نیست.", show_alert=True)
             return
         game.no_host_mafia_nato_pending_role = role_val
+        if game.scenario_name == "bazpors":
+            # بازپرس — پنل نقش‌ها با نقش انتخابی قرمز + تأیید سبز در همان صفحه.
+            await callback.answer("انتخاب شد؛ تأیید کنید.")
+            text = append_pending_selection_line(
+                _nato_role_pick_html(game),
+                [_nato_role_pending_line(game)],
+            )
+            kb = _role_pick_keyboard(game, nato_uid)
+            await update_mirror_prompt_pair(
+                bot,
+                game,
+                ui_key,
+                text,
+                kb,
+                assistant_uid=nato_uid,
+                parse_mode="HTML",
+            )
+            return
         await callback.answer("انتخاب شد؛ تأیید کنید.")
         confirm_text = build_no_host_nato_role_confirm_html(guess_role)
         confirm_kb = _confirm_keyboard(game, nato_uid, "n1c", "n1b")
@@ -568,6 +653,30 @@ async def dispatch_no_host_mafia_nato(
         pool_ids = {p.user_id for p in _nato_player_pool(game)}
         if tid not in pool_ids:
             await callback.answer("انتخاب نامعتبر.", show_alert=True)
+            return
+        if game.scenario_name == "bazpors":
+            if game.no_host_mafia_nato_pending_target_uid == tid:
+                # زدن دوباره روی انتخاب فعلی = لغو انتخاب (بازگشت به لیست).
+                game.no_host_mafia_nato_pending_target_uid = None
+                await callback.answer("انتخاب لغو شد.")
+            else:
+                game.no_host_mafia_nato_pending_target_uid = tid
+                await callback.answer("انتخاب شد؛ تأیید کنید.")
+            # بازپرس — پنل بازیکن‌ها با هدف قرمز + تأیید سبز در همان صفحه.
+            text = append_pending_selection_line(
+                _nato_player_pick_html(game, Role(_nato_pending_role_val(game))),
+                [_nato_player_pending_line(game, gm)],
+            )
+            kb = _player_pick_keyboard(game, nato_uid, gm)
+            await update_mirror_prompt_pair(
+                bot,
+                game,
+                ui_key,
+                text,
+                kb,
+                assistant_uid=nato_uid,
+                parse_mode="HTML",
+            )
             return
         game.no_host_mafia_nato_pending_target_uid = tid
         await callback.answer("انتخاب شد؛ تأیید کنید.")

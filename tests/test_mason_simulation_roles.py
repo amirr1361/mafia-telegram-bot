@@ -164,8 +164,8 @@ class MasonSimulationGunnerSaboteurTests(unittest.TestCase):
     def test_holder_death_after_delivery_keeps_gun_spent(self) -> None:
         h = MasonSimHarness.build(GameManager(), max_players=16)
         gn = h.holder(Role.GUNMAN)
-        holder_uid = h.first_town_target()
         assert gn is not None
+        holder_uid = h.first_town_target(exclude_uids=[gn.user_id])
         ms_gn.commit_mason_gunner_target(h.game, gn, h.game.players[holder_uid])
         ms_gn.prepare_mason_day_gun_from_night_choices(h.game)
         ms_gn.mark_mason_gun_delivered_to_holder(h.game)
@@ -179,8 +179,8 @@ class MasonSimulationMasonRecruitTests(unittest.TestCase):
     def test_town_recruit_adds_to_team(self) -> None:
         h = MasonSimHarness.build(GameManager(), max_players=16)
         mason = h.holder(Role.MASON)
-        target_uid = h.first_town_target()
         assert mason is not None
+        target_uid = h.first_town_target(exclude_uids=[mason.user_id])
         ms_mf.commit_mason_recruit(h.game, mason, h.game.players[target_uid])
         self.assertIn(target_uid, h.game.mason_team_member_ids)
 

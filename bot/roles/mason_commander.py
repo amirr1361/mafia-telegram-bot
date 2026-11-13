@@ -234,6 +234,13 @@ def reset_mason_role_counters_for_new_game(game: Game) -> None:
     game.mason_sniper_bullets_spent = 0
     game.mason_sniper_night_selected_uids = []
     game.mason_commander_night_approved_uids = []
+    game.mason_sniper_night_no_shot = False
+    game.mason_commander_night_no_shot = False
+    game.mason_commander_pending_decision_uids = []
+    game.mason_commander_pending_reject_all = False
+    game.mason_doctor_night_none_pending = False
+    game.mason_night_detective_pending_uid = None
+    game.mason_pending_recruit_dead_tailor = False
     game.mason_guardian_night_target_uid = None
     game.mason_guardian_day_protection_uid = None
     game.mason_apache_day_target_uid = None

@@ -551,6 +551,17 @@ async def handle_mason_helper_action(
 ) -> None:
     if callback.message is None:
         return
+    if kind == "force_night_btn":
+        from bot.mason_force_finish_night import handle_mason_force_finish_button
+
+        await handle_mason_force_finish_button(
+            callback,
+            bot,
+            game,
+            gm,
+            assistant_uid=assistant_uid,
+        )
+        return
     if kind == "force_night":
         from bot.mason_force_finish_night import handle_mason_force_finish_callback
 

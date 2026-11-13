@@ -1,4 +1,4 @@
-"""یادآور زندهٔ اکت شب برای کمک‌کننده — فقط ماسون."""
+"""یادآور عمومی شب ماسون — متن ثابت، بدون نام بازیکن/نقش."""
 
 from __future__ import annotations
 
@@ -10,19 +10,17 @@ from bot.bazpors_narrator import NIGHT_START
 from bot.game import GameManager, is_synthetic_player_uid
 from bot.mason_night_reminder import (
     REMINDER_DELAY_SEC,
-    _DONE_MARK,
     _send_reminder_if_needed,
     build_mason_night_reminder_text,
+    cancel_mason_night_reminder_task,
     cleanup_mason_night_helper_reminder,
     collect_mason_night_pending_holder_uids,
     mason_reminder_display_name,
     refresh_mason_night_helper_reminder,
     schedule_mason_night_helper_reminder,
-    cancel_mason_night_reminder_task,
 )
 from bot.mason_night_ready import maybe_finish_mason_parallel_night
 from bot.models import Phase, Player, Role
-from bot.text_fa import fa_digits
 
 
 def _p(uid, name, role, *, alive=True, seat=0):
@@ -58,6 +56,8 @@ def _mark_roles_done(game):
         "mason_night_natasha_confirmed", "mason_night_priest_confirmed",
     ):
         setattr(game, attr, True)
+    # اوکی انتظار شهرونده‌های سادهٔ زنده (۵۵، ۵۶ و کمک‌کنندهٔ ۹۰۰)
+    game.mason_night_wait_ok_uids = [55, 56, 900]
 
 
 def _mafia_done(game):
@@ -78,37 +78,40 @@ def _seed_pending_cast(gm, game):
     game.mafia_ids = {-920008}
 
 
-class MasonNightReminderUnitTests(unittest.TestCase):
+class MasonNightReminderTextTests(unittest.TestCase):
+    def test_delay_constant_is_120(self):
+        self.assertEqual(REMINDER_DELAY_SEC, 120.0)
+
     def test_display_name_strips_synthetic_role(self):
         p = _p(-920005, "خسروی - پزشک", Role.DOCTOR, seat=3)
         self.assertEqual(mason_reminder_display_name(p), "خسروی")
-        self.assertNotIn("پزشک", mason_reminder_display_name(p))
 
-    def test_text_has_no_roles(self):
+    def test_text_is_generic_static(self):
         gm = GameManager()
         game = _night_game(gm)
         _seed_pending_cast(gm, game)
-        pending = collect_mason_night_pending_holder_uids(game, gm)
-        text = build_mason_night_reminder_text(game, pending, pending_uids=set(pending))
-        self.assertIn("بازیکن‌های زیر هنوز اکت خودشان را انجام نداده‌اند:", text)
-        self.assertIn("ربات پایان شب را اعلام نمی‌کند", text)
-        for banned in ("پزشک", "گادفادر", "ماسون", "DOCTOR", "GODFATHER"):
+        text = build_mason_night_reminder_text(game, 4)
+        # متن عمومی با شمارندهٔ زنده — بدون هیچ نام/نقش/صندلی
+        self.assertIn("🌙 قابلیت اتمام شب", text)
+        self.assertIn("هنوز ۴ اقدام شبانه تکمیل نشده است", text)
+        self.assertIn("گزینه «اتمام شب»", text)
+        self.assertIn("اقدامات تأییدشده محاسبه می‌شوند", text)
+        for banned in ("پزشک", "گادفادر", "ماسون", "خسروی", "ابوالفضل", "Ali", "Reza", "DOCTOR", "GODFATHER"):
             self.assertNotIn(banned, text)
+        # بدون هشدارهای سرباز/اسنایپر (فقط ویژهٔ نماینده ۱۲/۱۳)
+        self.assertNotIn("🪖", text)
+        self.assertNotIn("🎯", text)
 
-    def test_seat_order_stable(self):
+    def test_text_identical_for_different_casts(self):
         gm = GameManager()
         game = _night_game(gm)
-        gm.add_player(game, _p(20, "B", Role.TOWN_SIMPLE, seat=2))
-        gm.add_player(game, _p(10, "A", Role.TOWN_SIMPLE, seat=1))
-        gm.add_player(game, _p(30, "C", Role.TOWN_SIMPLE, seat=3))
-        _mafia_done(game)
-        _mark_roles_done(game)
-        pending = collect_mason_night_pending_holder_uids(game, gm)
-        self.assertEqual(pending, [10, 20, 30])
-        text = build_mason_night_reminder_text(game, pending, pending_uids=set(pending))
-        self.assertLess(text.index("A"), text.index("B"))
-        self.assertLess(text.index("B"), text.index("C"))
-        self.assertIn(f"{fa_digits(1)}- A", text)
+        _seed_pending_cast(gm, game)
+        text1 = build_mason_night_reminder_text(game, 3)
+        gm2 = GameManager()
+        game2 = _night_game(gm2)
+        gm2.add_player(game2, _p(10, "SomeoneElse", Role.DOCTOR, seat=1))
+        text2 = build_mason_night_reminder_text(game2, 3)
+        self.assertEqual(text1, text2)
 
 
 class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -129,7 +132,7 @@ class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
         _seed_pending_cast(gm, game)
         bot = self._bot()
         with patch("bot.mason_night_reminder.asyncio.sleep", new=AsyncMock()) as sleep_mock:
-            schedule_mason_night_helper_reminder(bot, game, delay_sec=60)
+            schedule_mason_night_helper_reminder(bot, game)
             await asyncio.sleep(0)
             cancel_mason_night_reminder_task(game.room_code)
         sleep_mock.assert_awaited()
@@ -148,7 +151,7 @@ class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
 
         with patch('bot.mason_night_reminder.asyncio.sleep', side_effect=_instant_sleep):
             with patch('bot.app_state.manager', gm):
-                schedule_mason_night_helper_reminder(bot, game, delay_sec=60)
+                schedule_mason_night_helper_reminder(bot, game)
                 from bot.mason_night_reminder import _REMINDER_TASKS
 
                 task = _REMINDER_TASKS.get(game.room_code)
@@ -156,8 +159,14 @@ class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 await task
         self.assertEqual(bot.send_message.await_args.kwargs.get('chat_id'), 900)
         text = bot.send_message.await_args.kwargs.get('text') or ''
-        self.assertIn('بازیکن‌های زیر هنوز اکت', text)
-        self.assertIsNone(bot.send_message.await_args.kwargs.get('reply_markup'))
+        self.assertIn('🌙 قابلیت اتمام شب', text)
+        self.assertIn('اقدام شبانه تکمیل نشده است', text)
+        self.assertNotIn('خسروی', text)
+        self.assertNotIn('گادفادر', text)
+        kb = bot.send_message.await_args.kwargs.get('reply_markup')
+        self.assertIsNotNone(kb)
+        labels = [btn.text for row in kb.inline_keyboard for btn in row]
+        self.assertEqual(labels, ['🌙 اتمام شب'])
         for c in bot.send_message.await_args_list:
             self.assertEqual(c.kwargs.get('chat_id'), 900)
 
@@ -202,6 +211,20 @@ class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
         await _send_reminder_if_needed(bot, game, gm, generation=gen, night_count=1, created_at_iso=iso)
         bot.send_message.assert_not_called()
 
+    async def test_no_reminder_without_pending_actions(self):
+        gm = GameManager()
+        game = _night_game(gm)
+        _seed_pending_cast(gm, game)
+        _mafia_done(game)
+        _mark_roles_done(game)
+        bot = self._bot()
+        gen = 1
+        iso = game.created_at.isoformat()
+        game.mason_night_reminder_generation = gen
+        game.mason_night_reminder_created_at_iso = iso
+        await _send_reminder_if_needed(bot, game, gm, generation=gen, night_count=1, created_at_iso=iso)
+        bot.send_message.assert_not_called()
+
     async def test_synthetic_included_observer_excluded(self):
         gm = GameManager()
         game = _night_game(gm)
@@ -221,18 +244,7 @@ class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(10, pending)
         self.assertNotIn(11, pending)
 
-    async def test_mark_done_keeps_position(self):
-        gm = GameManager()
-        game = _night_game(gm)
-        gm.add_player(game, _p(10, "Ali", Role.TOWN_SIMPLE, seat=1))
-        gm.add_player(game, _p(20, "Reza", Role.TOWN_SIMPLE, seat=2))
-        gm.add_player(game, _p(30, "Mehdi", Role.TOWN_SIMPLE, seat=3))
-        text = build_mason_night_reminder_text(game, [10, 20, 30], pending_uids={10, 30})
-        self.assertIn(f"{fa_digits(2)}- Reza{_DONE_MARK}", text)
-        self.assertLess(text.index("Ali"), text.index("Reza"))
-        self.assertLess(text.index("Reza"), text.index("Mehdi"))
-
-    async def test_refresh_edits_then_deletes_on_last(self):
+    async def test_refresh_deletes_when_done_without_edits(self):
         gm = GameManager()
         game = _night_game(gm)
         gm.add_player(game, _p(10, "Ali", Role.TOWN_SIMPLE, seat=1))
@@ -244,35 +256,78 @@ class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
         game.mason_night_reminder_initial_pending_uids = [10, 20]
         game.mason_night_reminder_last_text = "old"
         bot = self._bot()
-        game.mason_night_wait_ok_uids = [20]
-        await refresh_mason_night_helper_reminder(bot, game, gm)
-        edited = bot.edit_message_text.await_args.kwargs.get("text") or ""
-        self.assertIn(f"Reza{_DONE_MARK}", edited)
-        self.assertNotIn(f"Ali{_DONE_MARK}", edited)
         game.mason_night_wait_ok_uids = [10, 20]
         await refresh_mason_night_helper_reminder(bot, game, gm)
+        # متن ثابت است — هیچ ویرایشی انجام نمی‌شود؛ فقط حذف
+        bot.edit_message_text.assert_not_awaited()
         bot.delete_message.assert_awaited()
         self.assertIsNone(game.mason_night_reminder_message_id)
 
-    async def test_observer_confirm_marks_synthetic_player(self):
+    async def test_refresh_keeps_message_while_pending(self):
         gm = GameManager()
         game = _night_game(gm)
-        gm.add_player(game, _p(-920005, "خسروی - پزشک", Role.DOCTOR, seat=1))
-        gm.add_player(game, _p(10, "Ali", Role.TOWN_SIMPLE, seat=2))
+        gm.add_player(game, _p(10, "Ali", Role.TOWN_SIMPLE, seat=1))
+        gm.add_player(game, _p(20, "Reza", Role.TOWN_SIMPLE, seat=2))
         _mafia_done(game)
         _mark_roles_done(game)
-        game.mason_night_doctor_confirmed = False
         game.mason_night_reminder_chat_id = 900
-        game.mason_night_reminder_message_id = 88
-        game.mason_night_reminder_initial_pending_uids = [-920005, 10]
-        game.mason_night_reminder_last_text = "x"
+        game.mason_night_reminder_message_id = 77
+        game.mason_night_reminder_initial_pending_uids = [10, 20]
+        game.mason_night_reminder_last_text = build_mason_night_reminder_text(game, 1)
         bot = self._bot()
-        game.mason_night_doctor_confirmed = True
+        game.mason_night_wait_ok_uids = [20]
         await refresh_mason_night_helper_reminder(bot, game, gm)
-        edited = bot.edit_message_text.await_args.kwargs.get("text") or ""
-        self.assertIn(f"خسروی{_DONE_MARK}", edited)
-        self.assertNotIn("پزشک", edited)
-        self.assertNotIn("Observer", edited)
+        # شمارنده بدون تغییر → بدون edit و بدون پیام جدید
+        bot.edit_message_text.assert_not_awaited()
+        bot.delete_message.assert_not_awaited()
+        self.assertEqual(game.mason_night_reminder_message_id, 77)
+
+    async def test_refresh_edits_count_in_place_and_keeps_button(self):
+        gm = GameManager()
+        game = _night_game(gm)
+        gm.add_player(game, _p(10, "Ali", Role.TOWN_SIMPLE, seat=1))
+        gm.add_player(game, _p(20, "Reza", Role.TOWN_SIMPLE, seat=2))
+        _mafia_done(game)
+        _mark_roles_done(game)
+        game.mason_night_reminder_chat_id = 900
+        game.mason_night_reminder_message_id = 77
+        game.mason_night_reminder_initial_pending_uids = [10, 20]
+        # قبلاً ۲ اقدام ناتمام نمایش داده شده بود
+        game.mason_night_reminder_last_text = build_mason_night_reminder_text(game, 2)
+        bot = self._bot()
+        game.mason_night_wait_ok_uids = [20]
+        await refresh_mason_night_helper_reminder(bot, game, gm)
+        bot.edit_message_text.assert_awaited_once()
+        self.assertEqual(bot.edit_message_text.await_args.kwargs.get("chat_id"), 900)
+        self.assertEqual(bot.edit_message_text.await_args.kwargs.get("message_id"), 77)
+        text = bot.edit_message_text.await_args.kwargs.get("text") or ""
+        self.assertIn("هنوز ۱ اقدام شبانه تکمیل نشده است", text)
+        kb = bot.edit_message_text.await_args.kwargs.get("reply_markup")
+        self.assertIsNotNone(kb)
+        labels = [btn.text for row in kb.inline_keyboard for btn in row]
+        self.assertEqual(labels, ["🌙 اتمام شب"])
+        self.assertEqual(game.mason_night_reminder_last_text, text)
+
+    async def test_refresh_deletes_at_zero_count(self):
+        gm = GameManager()
+        game = _night_game(gm)
+        gm.add_player(game, _p(10, "Ali", Role.TOWN_SIMPLE, seat=1))
+        _mafia_done(game)
+        _mark_roles_done(game)
+        # همهٔ اوکی‌های انتظار ثبت شده و جمع‌آوری هنوز فعال: شمارنده صفر
+        game.mason_night_wait_ok_uids = [10, 900]
+        game.mason_night_reminder_chat_id = 900
+        game.mason_night_reminder_message_id = 77
+        game.mason_night_reminder_last_text = build_mason_night_reminder_text(game, 1)
+        bot = self._bot()
+        from bot.mason_night_ready import all_mason_parallel_night_ready
+
+        self.assertTrue(all_mason_parallel_night_ready(game))
+        # اتمام عادی (بدون فشار دکمه) → حذف پیام و باطل‌سازی callback؛
+        # هیچ اتمام اجباری و هیچ جریمه‌ای اجرا نمی‌شود.
+        await refresh_mason_night_helper_reminder(bot, game, gm)
+        bot.delete_message.assert_awaited()
+        self.assertIsNone(game.mason_night_reminder_message_id)
 
     async def test_stale_generation_timer_does_not_send(self):
         gm = GameManager()
@@ -320,21 +375,6 @@ class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
         await _send_reminder_if_needed(bot, game, gm, generation=gen, night_count=1, created_at_iso=iso)
         self.assertEqual(bot.send_message.await_count, 1)
 
-    async def test_edit_failure_does_not_raise(self):
-        from aiogram.exceptions import TelegramBadRequest
-        gm = GameManager()
-        game = _night_game(gm)
-        gm.add_player(game, _p(10, "Ali", Role.TOWN_SIMPLE, seat=1))
-        _mafia_done(game)
-        _mark_roles_done(game)
-        game.mason_night_reminder_chat_id = 900
-        game.mason_night_reminder_message_id = 1
-        game.mason_night_reminder_initial_pending_uids = [10]
-        game.mason_night_reminder_last_text = "old"
-        bot = self._bot()
-        bot.edit_message_text = AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="boom"))
-        await refresh_mason_night_helper_reminder(bot, game, gm)
-
     async def test_cleanup_deletes_message(self):
         gm = GameManager()
         game = _night_game(gm)
@@ -353,19 +393,17 @@ class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
         bot = self._bot()
         game.mason_night_reminder_generation = 3
         with patch("bot.mason_night_reminder.asyncio.sleep", new=AsyncMock()):
-            schedule_mason_night_helper_reminder(bot, game, delay_sec=60)
+            schedule_mason_night_helper_reminder(bot, game)
             cancel_mason_night_reminder_task(game.room_code)
         self.assertEqual(game.mason_night_reminder_generation, 4)
 
-    async def test_delay_constant_is_60(self):
-        self.assertEqual(REMINDER_DELAY_SEC, 60.0)
-
-    async def test_maybe_finish_refreshes_reminder(self):
+    async def test_maybe_finish_cleans_up_reminder(self):
         gm = GameManager()
         game = _night_game(gm)
         gm.add_player(game, _p(10, "Ali", Role.TOWN_SIMPLE, seat=1))
         _mafia_done(game)
         _mark_roles_done(game)
+        game.mason_night_wait_ok_uids = [10]
         game.mason_night_reminder_chat_id = 900
         game.mason_night_reminder_message_id = 9
         game.mason_night_reminder_initial_pending_uids = [10]
@@ -373,7 +411,7 @@ class MasonNightReminderDeliveryTests(unittest.IsolatedAsyncioTestCase):
         bot = self._bot()
         with patch("bot.no_host_night_ready.maybe_finish_no_host_parallel_night", new=AsyncMock()):
             await maybe_finish_mason_parallel_night(bot, game, gm)
-        bot.edit_message_text.assert_awaited()
+        bot.delete_message.assert_awaited()
 
 
 class MasonNightReminderIsolationTests(unittest.TestCase):

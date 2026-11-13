@@ -117,9 +117,55 @@ def commit_mason_doctor_save(game: Game, target_uid: int) -> bool:
     return True
 
 
+def remove_mason_doctor_save(game: Game, target_uid: int) -> bool:
+    """حذف یک انتخاب موقت پزشک (لمس دوبارهٔ دکمهٔ قرمز) — قبل از تأیید."""
+    if not is_mason_scenario(game):
+        return False
+    uids = mason_doctor_night_save_uids(game)
+    if target_uid not in uids:
+        return False
+    uids.remove(target_uid)
+    game.mason_doctor_night_save_uids = uids
+    doc = find_alive_mason_doctor(game)
+    if doc is not None and target_uid == doc.user_id:
+        game.mason_night_pending_doctor_self_save = False
+    return True
+
+
+def mason_doctor_display_pool(game: Game) -> list[Player]:
+    """همهٔ اهداف واجد شرط برای نمایش — شامل انتخاب‌شده‌ها (دکمهٔ قرمز)."""
+    doc = find_alive_mason_doctor(game)
+    alive = [p for p in game.players.values() if p.is_alive]
+    if doc is None:
+        return alive
+    if not can_mason_doctor_self_save(game):
+        return [p for p in alive if p.user_id != doc.user_id]
+    # نجات خودِ پزشک: دکمهٔ خودش باید در طول انتخاب نمایان بماند
+    # (قرمز وقتی انتخاب است؛ لمس دوباره = لغو). اعتبارسنجی نهایی در کامیت.
+    return alive
+
+
 def clear_mason_doctor_night_saves(game: Game) -> None:
     game.mason_doctor_night_save_uids = []
     game.mason_night_pending_doctor_self_save = False
+    game.mason_doctor_night_none_pending = False
+
+
+def mason_doctor_none_pending(game: Game) -> bool:
+    return bool(game.mason_doctor_night_none_pending)
+
+
+def set_mason_doctor_none_pending(game: Game) -> bool:
+    """انتخاب موقت «انتخابی ندارم» — نجات‌های موقت پاک می‌شوند (نافذ نیست تا تأیید)."""
+    if not is_mason_scenario(game):
+        return False
+    clear_mason_doctor_night_saves(game)
+    game.mason_doctor_night_none_pending = True
+    return True
+
+
+def clear_mason_doctor_none_pending(game: Game) -> None:
+    game.mason_doctor_night_none_pending = False
 
 
 def snapshot_mason_doctor_night_baseline(game: Game) -> None:

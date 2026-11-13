@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from bot import db
 from bot.mason_roles import masoon_roles_for_count
 from bot.models import Game, NightActions, Phase, Player, Role
+from bot.room_mode import is_namayande10_no_host_room
 
 
 CODE_LENGTH = 2
@@ -162,8 +163,9 @@ TAKAVAR_PLAYER_COUNTS = frozenset({10, 11, 12, 13, 15})
 MASOON2_PLAYER_COUNTS = frozenset({2})
 # ماسون رسمی: ۱۲ تا ۱۸ نفر
 MASOON_PLAYER_COUNTS = frozenset(range(12, 19))
-# نماینده: فقط این ظرفیت‌ها (۱۵ نفره تعریف نشده)
-NAMAYANDEH_PLAYER_COUNTS = frozenset({10, 11, 12, 13, 14, 16})
+# نماینده: فقط ترکیب‌های رسمی فورک بدون گرداننده (۱۰ تا ۱۳ بازیکن).
+# ظرفیت‌های قدیمی ۱۴/۱۶ (نمایندگان میزبان‌محور) دیگر پشتیبانی نمی‌شوند.
+NAMAYANDEH_PLAYER_COUNTS = frozenset({10, 11, 12, 13})
 
 ROLE_LABELS_FA: dict[Role, str] = {
     Role.MAFIA: "مافیا",
@@ -178,6 +180,7 @@ ROLE_LABELS_FA: dict[Role, str] = {
     Role.JOURNALIST: "خبرنگار",
     Role.CITIZEN: "شهروند ساده",
     Role.NATO: "ناتو",
+    Role.NATO_AGENT: "ناتو",
     Role.SHIAD: "شیاد",
     Role.HUNTER: "هانتر (شهروند)",
     Role.INTERROGATOR: "بازپرس",
@@ -239,6 +242,12 @@ def scenario_role_label_fa(game: Game, role: Role | None) -> str:
         from bot.russian_mafia import russian_role_label_fa
 
         return russian_role_label_fa(role)
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if is_namayande10_no_host_room(game):
+        from bot.nam10.role_labels import nam10_role_label_fa
+
+        return nam10_role_label_fa(role)
     return role_label_fa(role)
 
 
@@ -253,6 +262,7 @@ def is_mafia_team(role: Role | None) -> bool:
         Role.MAFIA_SIMPLE_2,
         Role.NATO,
         Role.SHIAD,
+        Role.NATO_AGENT,
         Role.KIDNAPPER,
         Role.MAFIA_BASIC,
         Role.GODFATHER,
@@ -602,8 +612,16 @@ def _grouped_roster_block(
     return "\n".join(lines)
 
 
-def role_roster_banner_text(scenario_name: str, max_players: int, gm: "GameManager") -> str:
-    roles = gm.intended_roles_for_room(scenario_name, max_players)
+def role_roster_banner_text(
+    scenario_name: str,
+    max_players: int,
+    gm: "GameManager",
+    *,
+    nam10_no_host: bool = False,
+) -> str:
+    roles = gm.intended_roles_for_room(
+        scenario_name, max_players, nam10_no_host=nam10_no_host
+    )
     if scenario_name == "mozakere":
         mafia_roles = [r for r in roles if is_mafia_team(r)]
         town_roles = [r for r in roles if not is_mafia_team(r)]
@@ -648,6 +666,18 @@ def role_roster_banner_text(scenario_name: str, max_players: int, gm: "GameManag
             f"نقش‌ها — سناریو ماسون ({_digits_fa(max_players)} نفره):",
             mafia_roles,
             town_roles,
+        )
+
+    if scenario_name == "namayande" and nam10_no_host:
+        mafia_roles = [r for r in roles if is_mafia_team(r)]
+        town_roles = [r for r in roles if not is_mafia_team(r)]
+        from bot.nam10.role_labels import nam10_role_label_fa
+
+        return _grouped_roster_block(
+            f"نقش‌ها — سناریو نماینده ({_digits_fa(max_players)} نفره):",
+            mafia_roles,
+            town_roles,
+            label_fn=nam10_role_label_fa,
         )
 
     if scenario_name == "namayande":
@@ -787,30 +817,29 @@ class GameManager:
         db.upsert_user_display_name(user_id, name)
 
     def format_player_tag(self, player: Player) -> str:
+        # Display-name priority: custom /myname name first, then the
+        # Telegram full name. Never append @username to displayed names.
         custom = self.user_display_names.get(player.user_id)
         if custom is not None:
-            label = custom
-            if player.username:
-                return f"{label} (@{player.username})"
-            return label
-        label = player.full_name
-        if player.username:
-            return f"{label} (@{player.username})"
-        return label
+            return custom
+        return player.full_name
 
     def format_user_tag(self, user_id: int, telegram_full_name: str, username: str | None) -> str:
+        # Display-name priority: custom /myname name first, then the
+        # Telegram full name. Never append @username to displayed names.
         custom = self.user_display_names.get(user_id)
         if custom is not None:
-            label = custom
-            if username:
-                return f"{label} (@{username})"
-            return label
-        label = telegram_full_name
-        if username:
-            return f"{label} (@{username})"
-        return label
+            return custom
+        return telegram_full_name
 
-    def intended_roles_for_room(self, scenario_name: str, max_players: int) -> list[Role]:
+    def intended_roles_for_room(
+        self, scenario_name: str, max_players: int, *, nam10_no_host: bool = False
+    ) -> list[Role]:
+        if nam10_no_host:
+            """نمایندهٔ ۱۰ نفره no-host — ترکیبِ مستقل fork."""
+            from bot.nam10.lobby import roles_for_count as nam10_roles_for_count
+
+            return nam10_roles_for_count(max_players)
         if scenario_name == "mozakere":
             return mozakere_roles_for_count(max_players)
         if scenario_name == "bazpors":
@@ -863,6 +892,7 @@ class GameManager:
         host_full_name: str = "",
         host_username: str | None = None,
         bazpors_host_mode: str | None = None,
+        nam10_no_host: bool = False,
     ) -> Game | None:
         scenario_key = scenario_name.strip().lower()
         if scenario_key not in self.scenarios:
@@ -934,6 +964,11 @@ class GameManager:
             game.bazpors_host_mode = bazpors_host_mode
         elif scenario_key == "russian_mafia" and bazpors_host_mode:
             game.bazpors_host_mode = bazpors_host_mode
+        if scenario_key == "namayande" and nam10_no_host:
+            """نماینده — fork مستقل no-host؛ پشتیبانی ۱۰ تا ۱۳ بازیکن."""
+            if max_players not in (10, 11, 12, 13):
+                return None
+            game.nmnd_host_mode = "no_host"
         self.games[code] = game
         self.host_to_room[host_id] = code
         self.persist_snapshot(game, reason="create")
@@ -1074,6 +1109,18 @@ class GameManager:
         if game.scenario_name != "bazpors" or game.bazpors_host_mode != "no_host":
             return "not_no_host"
         return self.fill_no_host_synthetic_lobby(game)
+
+    def fill_namayande10_synthetic_lobby(self, game: Game) -> str | None:
+        """نماینده ۱۰ نفره fork — پر کردن ساختگی مستقل، از روی neutral impl."""
+        if not is_namayande10_no_host_room(game):
+            return "not_no_host"
+        if game.phase != Phase.LOBBY:
+            return "not_lobby"
+        if game.seats_finalized or game.roles_dealt:
+            return "past_lobby"
+        if game.host_id not in game.players:
+            return "creator_not_player"
+        return self._fill_bazpors_synthetic_preserving_real_players(game)
 
     def _sync_synthetic_player_display_names_to_roles(self, game: Game) -> None:
         """
@@ -1474,9 +1521,13 @@ class GameManager:
         if len(key) != 4 or not key.isdigit():
             return None
         for game in self.games.values():
-            allowed = game.bazpors_host_mode == "no_host" or (
-                game.scenario_name == "russian_mafia"
-                and game.bazpors_host_mode == "host_helper"
+            allowed = (
+                game.bazpors_host_mode == "no_host"
+                or is_namayande10_no_host_room(game)
+                or (
+                    game.scenario_name == "russian_mafia"
+                    and game.bazpors_host_mode == "host_helper"
+                )
             )
             if (
                 allowed
@@ -1494,9 +1545,13 @@ class GameManager:
         full_name: str,
         username: str | None,
     ) -> str | None:
-        allowed_observer_room = game.bazpors_host_mode == "no_host" or (
-            game.scenario_name == "russian_mafia"
-            and game.bazpors_host_mode == "host_helper"
+        allowed_observer_room = (
+            game.bazpors_host_mode == "no_host"
+            or is_namayande10_no_host_room(game)
+            or (
+                game.scenario_name == "russian_mafia"
+                and game.bazpors_host_mode == "host_helper"
+            )
         )
         if not allowed_observer_room:
             return "not_no_host"
@@ -1698,6 +1753,18 @@ class GameManager:
             append_mason_role_labels_to_synthetic_players(game)
             return
         if game.scenario_name == "namayande":
+            from bot.room_mode import is_namayande10_no_host_room
+
+            if is_namayande10_no_host_room(game):
+                """نماینده ۱۰ نفره fork — نقش‌دهی مستقل روی state جدای nmnd_*."""
+                from bot.nam10.lobby import (
+                    assign_roles_namayande10,
+                    sync_synthetic_player_display_names_nam10,
+                )
+
+                assign_roles_namayande10(game)
+                sync_synthetic_player_display_names_nam10(game)
+                return
             self._assign_roles_namayande(game)
             return
         if game.scenario_name == "russian_mafia":
@@ -1898,8 +1965,21 @@ class GameManager:
         return bool(player and player.is_alive)
 
     def check_winner(self, game: Game) -> str | None:
+        from bot.room_mode import is_namayande10_no_host_room
+
         alive = self.alive_players(game)
         if not alive:
+            return None
+        if is_namayande10_no_host_room(game):
+            from bot.nam10.engine import nmnd_counts_as_alive_mafia_for_win
+
+            mafia_alive = sum(
+                1 for p in alive if nmnd_counts_as_alive_mafia_for_win(game, p)
+            )
+            if mafia_alive == 0:
+                return "شهروندها برنده شدند! 🎉"
+            if mafia_alive >= len(alive) - mafia_alive:
+                return "مافیا برنده شد! 😈"
             return None
         mafia_alive = sum(
             1 for p in alive if bazpors_counts_as_alive_mafia_for_win(game, p)

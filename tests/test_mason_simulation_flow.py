@@ -190,7 +190,11 @@ class MasonSimulationNoStuckTests(unittest.IsolatedAsyncioTestCase):
         h.assert_readiness(expected=True)
 
     async def test_sniper_no_shot_commander_chain_finishes(self) -> None:
-        from bot.mason_night_role import MSS_NONE, dispatch_mason_night_role
+        from bot.mason_night_role import (
+    MSS_CONFIRM,
+    MSS_NONE,
+    dispatch_mason_night_role,
+)
 
         gm = GameManager()
         h = MasonSimHarness.build(gm, max_players=16)
@@ -211,6 +215,14 @@ class MasonSimulationNoStuckTests(unittest.IsolatedAsyncioTestCase):
                 new_callable=AsyncMock,
             ),
             patch(
+                "bot.mason_night_role.register_mirror_prompt_pair",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "bot.mason_night_role.sync_role_mirror_panel",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "bot.mason_night_ready.maybe_finish_mason_parallel_night",
                 new_callable=AsyncMock,
             ),
@@ -223,6 +235,16 @@ class MasonSimulationNoStuckTests(unittest.IsolatedAsyncioTestCase):
                 as_uid=sn_uid,
                 actor_uid=sn_uid,
                 act=MSS_NONE,
+                tid=0,
+            )
+            await dispatch_mason_night_role(
+                cb,
+                h.bot,
+                h.game,
+                h.gm,
+                as_uid=sn_uid,
+                actor_uid=sn_uid,
+                act=MSS_CONFIRM,
                 tid=0,
             )
         self.assertTrue(h.game.mason_night_sniper_confirmed)

@@ -18,6 +18,11 @@ from bot.bazpors_narrator import (
 )
 from bot.game import is_synthetic_player_uid
 from bot.models import Game, Player
+from bot.no_host_role_pick_common import (
+    append_pending_selection_line,
+    apply_bazpors_panel_styles,
+    with_inline_confirm_row,
+)
 from bot.roles.registry import find_alive_role_holder
 from bot.roles.registry import require_role_module
 
@@ -54,12 +59,28 @@ def _interrog_ui_key(game: Game, int_uid: int) -> str:
 def _player_button_name(p: Player | None, uid: int) -> str:
     if p is None:
         return str(uid)
+    from bot.app_state import custom_display_name
+
+    custom = custom_display_name(uid)
+    if custom is not None:
+        return custom
     return p.full_name or str(uid)
 
 
 def build_no_host_interrog_int1_html(game: Game) -> str:
     nc = max(1, game.bazpors_narrator_night_count)
     night_lbl = _night_title_fa(nc)
+    if game.scenario_name == "bazpors":
+        return (
+            f"⚖️ {night_lbl} — بازپرس\n\n"
+            "🪪 <b>دو نفر</b> (دو بازیکن متفاوت) را از لیست زیر برای بازپرسی "
+            "انتخاب کنید.\n\n"
+            "✅ پس از انتخاب هر دو نفر، دکمهٔ «تأیید انتخاب» را بزنید تا بازپرسی "
+            "ثبت شود؛ انتخاب‌ها فقط با تأیید نهایی ثبت می‌شوند.\n\n"
+            "🚫 اگر این شب بازپرسی انجام نمی‌شود، گزینهٔ «کسی را انتخاب نکردم» را "
+            "بزنید و سپس تأیید کنید.\n\n"
+            "📜 بازپرس فقط یک‌بار در کل بازی می‌تواند از این قابلیت استفاده کند."
+        )
     return (
         f"⚖️ {night_lbl} — بازپرس\n\n"
         "🪪 <b>نفر اول بازپرسی</b> را از لیست زیر انتخاب کنید.\n\n"
@@ -122,7 +143,34 @@ def build_no_host_interrog_waiting_html(game: Game, gm: "GameManager") -> str:
     )
 
 
+def _interrog_pending_line(game: Game, gm: "GameManager") -> str:
+    """خط انتخاب فعلی پنل بازپرس — انتخاب‌های موقتی یا انصراف."""
+    if game.no_host_interrog_pending_skip:
+        return "⭕ انتخاب فعلی: <b>کسی را انتخاب نکردم</b>"
+    uids = list(game.no_host_interrog_pending_uids)
+    if uids:
+        names: list[str] = []
+        for uid in uids:
+            p = game.players.get(uid)
+            names.append(
+                html.escape(gm.format_player_tag(p) if p else str(uid))[:40]
+            )
+        return "⚖️ انتخاب فعلی: <b>" + " و ".join(names) + "</b>"
+    return "⚖️ انتخاب فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
+
+
+def _bazpors_interrog_panel(game: Game) -> bool:
+    """پنل دو-نفرهٔ بازپرس — فقط بازپرس (سناریوهای دیگر بدون تغییر)."""
+    return game.scenario_name == "bazpors"
+
+
 def _int1_keyboard(game: Game, int_uid: int, gm: "GameManager") -> InlineKeyboardMarkup:
+    """پنل بازپرس — همهٔ بازیکنان آبی، حداکثر دو انتخاب قرمز + انصراف + تأیید سبز.
+
+    از همان رندر اولیه دقیقاً یک دکمهٔ تأیید (niisk) دیده می‌شود؛ بازپرسی
+    فقط پس از تأیید نهایی ثبت و قابلیت مصرف می‌شود. سناریوهای دیگر:
+    کیبورد قبلی بدون هیچ تغییر بصری.
+    """
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
     for p in sorted(
@@ -149,7 +197,36 @@ def _int1_keyboard(game: Game, int_uid: int, gm: "GameManager") -> InlineKeyboar
             )
         ]
     )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    if not _bazpors_interrog_panel(game):
+        # سناریوهای دیگر — کیبورد قبلی (بدون دکمهٔ تأیید، بدون شیب‌بندی).
+        first_pick = game.bazpors_interrog_first_uid or game.bazpors_interrog_pick_uid
+        return apply_bazpors_panel_styles(
+            game,
+            kb,
+            pick_acts={"nii1"},
+            selected_uids=[first_pick] if first_pick is not None else [],
+            ok_acts={"nii1s"},
+        )
+    pending = list(game.no_host_interrog_pending_uids)
+    if not pending:
+        committed_first = (
+            game.bazpors_interrog_first_uid or game.bazpors_interrog_pick_uid
+        )
+        if committed_first is not None:
+            pending = [committed_first]
+    pool_sorted = sorted(
+        _interrogator_role.int1_pool(game),
+        key=lambda pl: (pl.seat if pl.seat is not None else 999, pl.user_id),
+    )
+    for i, p in enumerate(pool_sorted):
+        btn = rows[i // 2][i % 2]
+        btn.style = "danger" if p.user_id in pending else "primary"
+    for btn in kb.inline_keyboard[-1]:
+        btn.style = "danger" if game.no_host_interrog_pending_skip else "primary"
+    # تأیید سبز از رندر اولیه — بازپرسی فقط با تأیید نهایی ثبت می‌شود.
+    kb = with_inline_confirm_row(game, int_uid, kb, confirm_act="niisk")
+    return kb
 
 
 def _int2_keyboard(game: Game, int_uid: int, gm: "GameManager") -> InlineKeyboardMarkup:
@@ -190,21 +267,30 @@ def _int2_keyboard(game: Game, int_uid: int, gm: "GameManager") -> InlineKeyboar
             )
         ]
     )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(inline_keyboard=rows),
+        pick_acts={"nii2"},
+        ok_acts={"nii2a", "nii2r"},
+    )
 
 
 def _skip_ack_keyboard(game: Game, int_uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ تأیید",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="niisk", as_uid=int_uid
-                    ).pack(),
-                )
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ تأیید",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act="niisk", as_uid=int_uid
+                        ).pack(),
+                    )
+                ]
             ]
-        ]
+        ),
+        ok_acts={"niisk"},
     )
 
 
@@ -335,6 +421,8 @@ async def start_no_host_interrogator_night_flow(
     game.no_host_interrog_flow_active = True
     game.no_host_interrog_dm_signature = sig
     _interrogator_role.clear_night_pick(game)
+    game.no_host_interrog_pending_uids = []
+    game.no_host_interrog_pending_skip = False
 
     int_uid = intr.user_id
     if _interrogator_role.ability_used(game):
@@ -412,13 +500,21 @@ async def _after_interrog_commit(
     if game.bazpors_interrog_once_done or (
         game.no_host_interrog_ui_phase == PHASE_SKIP_ACK
     ):
-        await publish_no_host_night_ack_panel(
-            bot,
-            game,
-            int_uid,
-            ui_key,
-            build_no_host_interrog_waiting_html(game, gm),
+        # Skip / already-used commits must CLOSE the same panel for the
+        # player and the observer (kb=None) just like target commits do.
+        # Publish-with-OK kept the panel interactive forever (Room 60).
+        if game.bazpors_interrog_once_done:
+            label = "بازپرسی قبلاً انجام شده است"
+        else:
+            label = "کسی را انتخاب نکردم"
+        await finalize_no_host_role_pick_message(
+            bot, game, gm, int_uid, ui_key, label
         )
+        from bot.no_host_night_ready import maybe_finish_no_host_parallel_night
+
+        # Skip-ack commits are real readiness events: without this check a
+        # late skip-ack left the parallel collection stalled.
+        await maybe_finish_no_host_parallel_night(bot, game, gm)
         return
     u1, u2 = game.bazpors_interrog_first_uid, game.bazpors_interrog_second_uid
     if u1 is not None and u2 is not None:
@@ -469,9 +565,44 @@ async def dispatch_no_host_interrogator_night(
     phase = game.no_host_interrog_ui_phase
 
     if act == "niisk":
+        if _bazpors_interrog_panel(game) and phase == PHASE_INT1:
+            # بازپرس — تأیید سبز پنل واحد: دو نامزد یا انصراف ثبت می‌شود.
+            if game.no_host_interrog_pending_skip:
+                # انصراف از بازپرسی — فقط با تأیید سبز ثبت می‌شود.
+                _interrogator_role.clear_night_pick(game)
+                game.no_host_interrog_ui_phase = PHASE_SKIP_ACK
+                game.no_host_interrog_pending_uids = []
+                game.no_host_interrog_pending_skip = False
+                _mark_interrog_confirmed(game, int_uid=int_uid)
+                await callback.answer("ثبت شد.")
+                await _after_interrog_commit(bot, game, gm, int_uid)
+                return
+            pending = list(game.no_host_interrog_pending_uids)
+            if len(pending) != 2 or pending[0] == pending[1]:
+                await callback.answer(
+                    "ابتدا دو بازیکن را انتخاب کنید یا گزینهٔ «کسی را انتخاب نکردم» "
+                    "را با تأیید ثبت کنید.",
+                    show_alert=True,
+                )
+                return
+            if not (
+                _interrogator_role.first_target_valid(game, pending[0])
+                and _interrogator_role.second_target_valid(game, pending[1])
+            ):
+                await callback.answer("انتخاب نامعتبر است.", show_alert=True)
+                return
+            _interrogator_role.commit_first_nominee(game, pending[0])
+            _interrogator_role.commit_second_nominee(game, pending[1])
+            _mark_interrog_confirmed(game, int_uid=int_uid)
+            game.no_host_interrog_pending_uids = []
+            game.no_host_interrog_pending_skip = False
+            await callback.answer("بازپرسی ثبت شد.")
+            await _after_interrog_commit(bot, game, gm, int_uid)
+            return
         if phase != PHASE_SKIP_ACK:
             await callback.answer("نامعتبر.", show_alert=True)
             return
+        # جریان قبلی — تأیید پنل اوکی انصراف.
         _mark_interrog_confirmed(game, int_uid=int_uid)
         await callback.answer("ثبت شد.")
         await _after_interrog_commit(bot, game, gm, int_uid)
@@ -484,6 +615,32 @@ async def dispatch_no_host_interrogator_night(
         if not _interrogator_role.first_target_valid(game, tid):
             await callback.answer("بازیکن نامعتبر.", show_alert=True)
             return
+        if _bazpors_interrog_panel(game):
+            pending = list(game.no_host_interrog_pending_uids)
+            if tid in pending:
+                # زدن دوباره روی انتخاب فعلی = لغو آن انتخاب.
+                pending.remove(tid)
+                await callback.answer("انتخاب لغو شد.")
+            elif len(pending) >= 2:
+                await callback.answer(
+                    "حداکثر دو بازیکن را می‌توانید انتخاب کنید؛ ابتدا یکی را لغو کنید.",
+                    show_alert=True,
+                )
+                return
+            else:
+                pending.append(tid)
+                game.no_host_interrog_pending_skip = False
+                await callback.answer("انتخاب شد؛ تأیید کنید.")
+            game.no_host_interrog_pending_uids = pending
+            # پنل انتخاب با انتخاب(های) قرمز + تأیید سبز در همان صفحه.
+            text = append_pending_selection_line(
+                build_no_host_interrog_int1_html(game),
+                [_interrog_pending_line(game, gm)],
+            )
+            kb = _int1_keyboard(game, int_uid, gm)
+            await _sync_panel(bot, game, int_uid, text, kb)
+            return
+        # جریان قبلی — ثبت نفر اول و رفتن به پنل نفر دوم.
         _interrogator_role.commit_first_nominee(game, tid)
         game.no_host_interrog_ui_phase = PHASE_INT2
         await callback.answer("نفر اول ثبت شد؛ نفر دوم را انتخاب کنید.")
@@ -496,6 +653,22 @@ async def dispatch_no_host_interrogator_night(
         if phase != PHASE_INT1:
             await callback.answer("نامعتبر.", show_alert=True)
             return
+        if _bazpors_interrog_panel(game):
+            if game.no_host_interrog_pending_skip:
+                game.no_host_interrog_pending_skip = False
+                await callback.answer("انصراف از انصراف — انتخاب‌ها پاک شده‌اند؛ لغو شد.")
+            else:
+                game.no_host_interrog_pending_skip = True
+                game.no_host_interrog_pending_uids = []
+                await callback.answer("انصراف؛ برای ثبت تأیید کنید.")
+            text = append_pending_selection_line(
+                build_no_host_interrog_int1_html(game),
+                [_interrog_pending_line(game, gm)],
+            )
+            kb = _int1_keyboard(game, int_uid, gm)
+            await _sync_panel(bot, game, int_uid, text, kb)
+            return
+        # جریان قبلی — انصراف فوری.
         _interrogator_role.clear_night_pick(game)
         _mark_interrog_confirmed(game, int_uid=int_uid)
         await callback.answer("ثبت شد.")

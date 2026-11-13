@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,6 +19,130 @@ if TYPE_CHECKING:
     from bot.game import GameManager
 
 _ORDINALS_FA = ("اول", "دوم", "سوم", "چهارم", "پنجم", "ششم")
+
+# برچسب‌های تأیید/اعلام — فقط ماسون
+MASON_DECL_BUTTON_LABEL = "اعلام نقش و انتخاب بازیکن"
+MASON_DECL_CONFIRM_QUESTION = (
+    "آیا مطمئن هستید که می‌خواهید نقش خود را اعلام کنید و یک بازیکن را انتخاب کنید؟"
+)
+MASON_DECL_OK_LABEL = "✅ تأیید"
+MASON_CANCEL_LABEL = "❌ انصراف"
+MASON_FINAL_CONFIRM_LABEL = "✅ تأیید انتخاب"
+MASON_BACK_LABEL = "↩️ بازگشت"
+
+
+def build_mason_declare_intent_keyboard(
+    game: Game, as_uid: int, *, intent_act: str
+) -> InlineKeyboardMarkup:
+    """دکمهٔ آغاز «اعلام نقش و انتخاب بازیکن» (آبی)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=MASON_DECL_BUTTON_LABEL,
+                    callback_data=PlayerMirrorCb(
+                        code=game.room_code, act=intent_act, as_uid=as_uid
+                    ).pack(),
+                    style="primary",
+                )
+            ]
+        ]
+    )
+
+
+def build_mason_declare_confirm_keyboard(
+    game: Game, as_uid: int, *, ok_act: str, cancel_act: str
+) -> InlineKeyboardMarkup:
+    """تأیید مرحلهٔ اعلام نقش — ✅ تأیید / ❌ انصراف (هر دو آبی)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=MASON_DECL_OK_LABEL,
+                    callback_data=PlayerMirrorCb(
+                        code=game.room_code, act=ok_act, as_uid=as_uid
+                    ).pack(),
+                    style="primary",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=MASON_CANCEL_LABEL,
+                    callback_data=PlayerMirrorCb(
+                        code=game.room_code, act=cancel_act, as_uid=as_uid
+                    ).pack(),
+                    style="primary",
+                )
+            ],
+        ]
+    )
+
+
+def build_mason_final_confirm_row(
+    game: Game, as_uid: int, *, confirm_act: str
+) -> list[InlineKeyboardButton]:
+    """ردیف دکمهٔ تأیید نهایی «✅ تأیید انتخاب» (آبی)."""
+    return [
+        InlineKeyboardButton(
+            text=MASON_FINAL_CONFIRM_LABEL,
+            callback_data=PlayerMirrorCb(
+                code=game.room_code, act=confirm_act, as_uid=as_uid
+            ).pack(),
+            style="primary",
+        )
+    ]
+
+
+def build_mason_back_row(
+    game: Game, as_uid: int, *, back_act: str
+) -> list[InlineKeyboardButton]:
+    """ردیف دکمهٔ بازگشت «↩️ بازگشت» (آبی)."""
+    return [
+        InlineKeyboardButton(
+            text=MASON_BACK_LABEL,
+            callback_data=PlayerMirrorCb(
+                code=game.room_code, act=back_act, as_uid=as_uid
+            ).pack(),
+            style="primary",
+        )
+    ]
+
+
+def build_mason_single_pick_keyboard(
+    game: Game,
+    as_uid: int,
+    *,
+    pick_act: str,
+    players: list[Player],
+    pending_uid: int | None,
+    confirm_act: str,
+    back_act: str,
+    none_act: str | None = None,
+    none_text: str | None = None,
+    back_always: bool = False,
+    none_selected: bool = False,
+    display_names: Mapping[int, str] | None = None,
+) -> InlineKeyboardMarkup:
+    """کیبورد انتخاب تک‌هدفی ماسون — آبی/قرمز + تأیید انتخاب هنگام انتخاب."""
+    rows = build_target_button_rows(
+        game,
+        as_uid=as_uid,
+        pick_act=pick_act,
+        players=players,
+        selected_uids=[pending_uid] if pending_uid is not None else None,
+        selected_style="danger",
+        display_names=display_names,
+    )
+    if pending_uid is not None or none_selected:
+        rows.append(build_mason_final_confirm_row(game, as_uid, confirm_act=confirm_act))
+    if pending_uid is not None or back_always:
+        rows.append(build_mason_back_row(game, as_uid, back_act=back_act))
+    if none_act is not None and none_text is not None:
+        row = build_none_pick_row(game, as_uid, none_act=none_act, none_text=none_text)
+        for btn in row:
+            btn.style = "danger" if none_selected else "primary"
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def mason_selection_ordinal_fa(index_1based: int) -> str:
@@ -110,15 +235,24 @@ def build_mason_multi_select_keyboard(
     none_text: str | None = None,
     done_act: str | None = None,
     done_text: str | None = None,
+    selected_uids: list[int] | None = None,
+    none_selected: bool = False,
+    display_names: Mapping[int, str] | None = None,
 ) -> InlineKeyboardMarkup:
     rows = build_target_button_rows(
         game,
         as_uid=as_uid,
         pick_act=pick_act,
         players=players,
+        selected_uids=selected_uids,
+        selected_style="danger",
+        display_names=display_names,
     )
     if none_act is not None and none_text is not None:
-        rows.append(build_none_pick_row(game, as_uid, none_act=none_act, none_text=none_text))
+        none_row = build_none_pick_row(game, as_uid, none_act=none_act, none_text=none_text)
+        for btn in none_row:
+            btn.style = "danger" if none_selected else "primary"
+        rows.append(none_row)
     if done_act is not None and done_text is not None:
         rows.append(
             [
@@ -127,6 +261,7 @@ def build_mason_multi_select_keyboard(
                     callback_data=PlayerMirrorCb(
                         code=game.room_code, act=done_act, as_uid=as_uid
                     ).pack(),
+                    style="primary",
                 )
             ]
         )

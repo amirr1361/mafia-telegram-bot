@@ -102,7 +102,13 @@ def _uses_bazpors_snapshot(game: Game) -> bool:
         "bazpors_salamat_test",
         "mozakere",
         "masoon",
-    )
+    ) or _is_nam10_no_host_game(game)
+
+
+def _is_nam10_no_host_game(game: Game) -> bool:
+    from bot.room_mode import is_namayande10_no_host_room
+
+    return is_namayande10_no_host_room(game)
 
 
 def bazpors_snapshot(game: Game) -> dict[str, Any]:
@@ -155,6 +161,13 @@ def bazpors_snapshot(game: Game) -> dict[str, Any]:
         "observer_user_id": game.observer_user_id,
         "players": players_snapshot(game),
     }
+    if _is_nam10_no_host_game(game):
+        # نمایندهٔ ۱۰ نفره (fork): روایت state مستقل nmnd_* روی همان کلیدها.
+        snap["narrator_step"] = game.nmnd_narrator_step
+        snap["night_substep"] = game.nmnd_night_substep
+        snap["host_day"] = game.nmnd_narrator_host_day
+        snap["night_count"] = game.nmnd_narrator_night_count
+        snap["pending_uid"] = game.nmnd_narrator_pending_uid
     if game.scenario_name == "mozakere":
         snap.update(
             {
@@ -238,9 +251,15 @@ def log_player_eliminated(
 
 
 def log_night_resolved(game: Game, gm: GameManager | None = None) -> None:
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if is_namayande10_no_host_room(game):
+        report_html = game.nmnd_night_report_html
+    else:
+        report_html = game.bazpors_night_report_html
     payload: dict[str, object] = {
         "bazpors": bazpors_snapshot(game),
-        "night_report_html": game.bazpors_night_report_html,
+        "night_report_html": report_html,
     }
     try:
         from bot.room_mode import is_mason_scenario

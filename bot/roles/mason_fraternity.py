@@ -206,6 +206,14 @@ def commit_mason_recruit_dead_tailor(game: Game, mason: Player) -> bool:
     return True
 
 
+def mason_recruit_dead_tailor_pending(game: Game) -> bool:
+    return bool(game.mason_pending_recruit_dead_tailor)
+
+
+def clear_mason_recruit_dead_tailor_pending(game: Game) -> None:
+    game.mason_pending_recruit_dead_tailor = False
+
+
 def mason_recruit_target_pool(game: Game, mason: Player) -> list[Player]:
     if not is_mason_role_holder(game, mason):
         return []
@@ -229,7 +237,13 @@ def mason_can_recruit_target(game: Game, mason: Player, target: Player) -> bool:
 
 
 def _player_display_name(player: Player) -> str:
-    return player.full_name or str(player.user_id)
+    from bot.app_state import custom_display_name
+
+    return (
+        custom_display_name(player.user_id)
+        or player.full_name
+        or str(player.user_id)
+    )
 
 
 def build_mason_recruit_welcome_message(game: Game, recruit_uid: int) -> str:
@@ -347,6 +361,7 @@ def resolve_mason_recruitment_result(game: Game) -> MasonRecruitmentResolution:
 def clear_mason_recruit_night_state(game: Game) -> None:
     game.mason_pending_recruit_uid = None
     game.mason_mason_night_no_recruit = False
+    game.mason_pending_recruit_dead_tailor = False
 
 
 def clear_mason_fraternity_state(game: Game) -> None:

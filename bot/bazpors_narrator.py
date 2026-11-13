@@ -1991,6 +1991,12 @@ def _day_discuss_body_fa(*, ki_as: bool, host_picks_winner: bool = False) -> str
 def _reset_night_flags(game: Game) -> None:
     game.actions = NightActions()
     game.bazpors_nato_action_registered = False
+    # Room 91: the helper force-finish latch must not leak into new nights.
+    game.bazpors_night_force_finished = False
+    game.bazpors_night_force_finished_night = None
+    # Mozakere mirror: night-scoped force-finish latch reset per new night.
+    game.mozakere_night_force_finished = False
+    game.mozakere_night_force_finished_night = None
     game.bazpors_nato_success = None
     game.bazpors_nato_kill_target_uid = None
     game.bazpors_mafia_shot_registered = False
@@ -2048,6 +2054,7 @@ def _reset_night_flags(game: Game) -> None:
     game.no_host_journalist_pending_tid = None
     game.no_host_journalist_idle_confirmed = False
     game.no_host_journalist_result_pending = False
+    game.no_host_journalist_neg_panel_sent_night = 0
     from bot.roles.night_state import mozakere_journalist_night_state
 
     if is_mozakere_scenario(game):
@@ -2179,11 +2186,14 @@ def _nr_report_name(game: Game, gm: GameManager, uid: int) -> str:
 
 
 def _nr_player_name_only(game: Game, uid: int) -> str:
-    """فقط نام بازیکن — بدون نقش (گزارش مذاکره)."""
+    """فقط نام بازیکن — بدون نقش (گزارش مذاکره)؛ اولویت نام /myname."""
     p = game.players.get(uid)
     if p is None:
         return html.escape(str(uid))
-    return html.escape(p.full_name or str(uid))
+    from bot.app_state import custom_display_name
+
+    custom = custom_display_name(uid)
+    return html.escape(custom or p.full_name or str(uid))
 
 
 def _nr_uid_for_role(game: Game, role: Role) -> int | None:
@@ -3620,7 +3630,18 @@ def build_host_message_and_keyboard(
         )
 
     if step == NIGHT_START:
-        from bot.room_mode import is_mason_scenario, mozakere_no_host_uses_parallel_night_ui
+        from bot.room_mode import (
+            is_bazpors_no_host_room,
+            is_mason_scenario,
+            is_mozakere_scenario,
+            mozakere_no_host_uses_parallel_night_ui,
+        )
+        if is_bazpors_no_host_room(game):
+            # بازپرس (no_host): پنل «شب … آغاز شد» برای کمک‌کننده ارسال
+            # نمی‌شود (همچنین تمام مسیرهای refresh/reissue آن). نظارتِ شب
+            # فقط از مسیر یادآور ۱۲۰ثانیه‌ای «قابلیت اتمام شب» است.
+            # پنل‌های بازیکنان و ناظر و ردیابی داخلی دست‌نخورده می‌مانند.
+            return "", None
 
         n = game.bazpors_narrator_night_count
         if n == 1:
@@ -3635,6 +3656,12 @@ def build_host_message_and_keyboard(
             no_host_assistant_narrator_active(game)
             and game.no_host_night_parallel_collect_active
         ):
+            # مذاکره: فهرست منتظرینِ شب برای کمک‌کنندهٔ ربات ارسال نمی‌شود
+            # (پنل گرداننده/ناظر که همین متن را کپی می‌کند هم ساخته نمی‌شود؛
+            # نظارتِ شب فقط از مسیر یادآور ۱۲۰ثانیه‌ای «قابلیت اتمام شب» است).
+            # پیگیری داخلی اقدامات و اعزام پنل‌های بازیکنان دست‌نخورده می‌ماند.
+            if is_mozakere_scenario(game):
+                return "", None
             from bot.no_host_night_ready import pending_no_host_night_actor_labels
 
             pending = pending_no_host_night_actor_labels(game)
@@ -5870,6 +5897,28 @@ async def _deliver_host_narrator_panel(
 
     # کمک‌کنندهٔ no_host: همیشه پنل قبلی حذف و پیام تازه (انتهای چت)، بدون edit.
     if no_host_assistant_narrator_active(game):
+        if (
+            edit_in_place is not None
+            and edit_in_place.chat.id == operator_id
+            and not force_new_message
+            and _bazpors_interrog_vote_panel_edit_in_place(game)
+        ):
+            # Room 97 scope (Bazpors interrog-day vote panel): keep the
+            # SAME message and update text/keyboard in place — never send
+            # a new panel while the helper is only changing the selection.
+            if await _try_edit_assistant_panel(
+                bot,
+                game,
+                text,
+                kb,
+                chat_id=edit_in_place.chat.id,
+                message_id=edit_in_place.message_id,
+            ):
+                if remember_panel:
+                    await _mirror_narrator_panel_to_observer(bot, game, text, kb)
+                return True
+            # In-place edit impossible (message gone / unchanged) — fall
+            # back to the legacy delete + resend below.
         if edit_in_place is not None and edit_in_place.chat.id == operator_id:
             try:
                 await bot.delete_message(
@@ -6134,6 +6183,77 @@ def preserve_night_end_host_message(step_before: str | None, act: str) -> bool:
     return bool(act)
 
 
+def _bazpors_interrog_vote_panel_edit_in_place(game: Game) -> bool:
+    """Room 97 scope (Bazpors only): the interrog-day session-result panel
+    keeps ONE message — selection clicks («ih_vtie»/«ih_velim») edit the
+    same panel in place instead of delete + resend."""
+    from bot.no_host_interrog_day import (
+        IH_PHASE_VOTE,
+        IH_PHASE_VOTE_CONFIRM,
+        NO_HOST_INTERROG_DAY,
+    )
+
+    return (
+        game.scenario_name == "bazpors"
+        and game.bazpors_narrator_step == NO_HOST_INTERROG_DAY
+        and game.no_host_interrog_day_phase
+        in (IH_PHASE_VOTE, IH_PHASE_VOTE_CONFIRM)
+    )
+
+
+def build_no_host_interrog_result_ack_text(
+    game: Game,
+    gm: GameManager,
+    pending_vote: int | str | None,
+) -> str:
+    """کمک‌کننده — تصدیق نهایی نتیجهٔ جلسه بازپرسی (بدون دکمه)."""
+    outcome = "رأی‌ها مساوی شد و کسی از بازی خارج نمی‌شود"
+    if pending_vote is not None and pending_vote != "tie":
+        p = game.players.get(pending_vote)
+        if p is not None:
+            name = html.escape(gm.format_player_tag(p))
+            outcome = f"بازیکن {name} با اجماع آرا از بازی خارج شد"
+    return f"☑ نتیجه جلسه بازپرسی ثبت شد: {outcome}."
+
+
+async def close_no_host_interrog_vote_panel_after_commit(
+    bot: Bot, game: Game, clicked: Message | None = None
+) -> None:
+    """حذف پنل رأی جلسه بازپرسی پس از تأیید — بدون باقی گذاشتن دکمهٔ فعال.
+
+    The day-start path already pushes a NEW host panel and re-points the
+    narrators refs; in that case only the stale clicked copy is removed.
+    When the vote panel is still the tracked panel (e.g. the game just
+    ended, or the flow returned early), the tracked panel and its
+    observer mirror are dismissed too.
+    """
+    ref_c = game.bazpors_assistant_panel_chat_id
+    ref_m = game.bazpors_assistant_panel_message_id
+    if ref_c is not None and ref_m is not None:
+        if (
+            clicked is not None
+            and (clicked.chat.id != ref_c or clicked.message_id != ref_m)
+        ):
+            # A NEWER panel replaced the vote panel — only the stale
+            # clicked copy is removed; refs stay pointing at the new panel.
+            try:
+                await bot.delete_message(
+                    chat_id=clicked.chat.id, message_id=clicked.message_id
+                )
+            except TelegramBadRequest:
+                pass
+            return
+    if clicked is not None:
+        try:
+            await bot.delete_message(
+                chat_id=clicked.chat.id, message_id=clicked.message_id
+            )
+        except TelegramBadRequest:
+            pass
+    clear_narrator_panel_ref(game)
+    await dismiss_observer_narrator_mirror_message(bot, game)
+
+
 async def refresh_host_message_after_callback(
     bot: Bot,
     game: Game,
@@ -6151,6 +6271,9 @@ async def refresh_host_message_after_callback(
     if game.bazpors_night_report_html:
         await deliver_observer_night_end_report(bot, game, gm)
     assistant_new_only = no_host_assistant_narrator_active(game)
+    in_place_ok = bool(
+        assistant_new_only and _bazpors_interrog_vote_panel_edit_in_place(game)
+    )
     from bot.no_host_handoff import (
         NO_HOST_HANDOFF_OFFER,
         deliver_no_host_handoff_offer_panels,
@@ -6164,8 +6287,8 @@ async def refresh_host_message_after_callback(
         bot,
         game,
         gm,
-        edit_in_place=None if assistant_new_only else edit_in_place,
-        force_new_message=assistant_new_only,
+        edit_in_place=edit_in_place if in_place_ok else None,
+        force_new_message=assistant_new_only and not in_place_ok,
     ):
         return
     await _run_post_host_panel_side_effects(bot, game, gm)
@@ -6175,6 +6298,9 @@ def begin_no_host_day1_defense_pick(game: Game) -> None:
     """آماده‌سازی پنل چندگزینه‌ای دفاعیهٔ پایان روز (no_host، بدون پنل گرداننده)."""
     game.no_host_day1_defense_active = True
     game.no_host_day1_defense_phase = "pick"
+    game.no_host_day1_defense_none_confirm_active = False
+    game.no_host_day1_pending_elim_uid = None
+    game.no_host_day1_pending_no_elim = False
     set_day_vote_pick_uids(game, set())
     set_day_vote_defender_uids(game, set())
     game.bazpors_day_vote_elim_reason = None
@@ -6197,6 +6323,7 @@ def no_host_day1_defense_no_votes_enter_night(game: Game) -> None:
     game.no_host_day1_defense_active = False
     game.no_host_day1_defense_phase = None
     game.no_host_day1_pending_elim_uid = None
+    game.no_host_day1_pending_no_elim = False
     game.no_host_assistant_narrator_active = True
     game.no_host_observer_only_narrator_mirror = True
     _enter_night_from_day_end(game)

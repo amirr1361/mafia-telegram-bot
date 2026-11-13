@@ -10,7 +10,9 @@ from bot.game import GameManager, is_synthetic_player_uid
 from bot.mason_night_ready import all_mason_parallel_night_ready
 from bot.mason_night_role import (
     MASON_SABOTEUR_GUN_SPENT_TEXT,
+    MGN_CONFIRM,
     MGN_NONE,
+    MSB_CONFIRM,
     MSB_NONE,
     MSB_OK,
     dispatch_mason_gunner_panel,
@@ -202,6 +204,12 @@ class MasonGunnerSaboteurNoneButtonTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "bot.mason_night_role._after_role_confirmed",
             new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
         ):
             await dispatch_mason_night_role(
                 cb,
@@ -213,8 +221,24 @@ class MasonGunnerSaboteurNoneButtonTests(unittest.IsolatedAsyncioTestCase):
                 act=MGN_NONE,
                 tid=0,
             )
+        # انتخاب موقت — بدون اجرا و بدون READY
         self.assertTrue(game.mason_gunner_night_no_give)
         self.assertFalse(ms_gn.mason_gun_is_spent(game))
+        self.assertFalse(game.mason_night_gunner_confirmed)
+        with patch(
+            "bot.mason_night_role._after_role_confirmed",
+            new=AsyncMock(),
+        ):
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=10,
+                actor_uid=10,
+                act=MGN_CONFIRM,
+                tid=0,
+            )
         self.assertTrue(game.mason_night_gunner_confirmed)
         ms_gn.prepare_mason_day_gun_from_night_choices(game)
         self.assertIsNone(ms_gn.mason_day_gun_holder_uid(game))
@@ -254,6 +278,12 @@ class MasonGunnerSaboteurNoneButtonTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "bot.mason_night_role._after_role_confirmed",
             new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
         ):
             await dispatch_mason_night_role(
                 cb,
@@ -265,7 +295,24 @@ class MasonGunnerSaboteurNoneButtonTests(unittest.IsolatedAsyncioTestCase):
                 act=MSB_NONE,
                 tid=0,
             )
+        # انتخاب موقت — بدون اجرا و بدون READY
         self.assertTrue(game.mason_saboteur_night_no_sabotage)
+        self.assertFalse(game.mason_night_saboteur_confirmed)
+        self.assertIsNone(game.mason_saboteur_night_target_uid)
+        with patch(
+            "bot.mason_night_role._after_role_confirmed",
+            new=AsyncMock(),
+        ):
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=2,
+                actor_uid=2,
+                act=MSB_CONFIRM,
+                tid=0,
+            )
         self.assertTrue(game.mason_night_saboteur_confirmed)
         self.assertIsNone(game.mason_saboteur_night_target_uid)
 

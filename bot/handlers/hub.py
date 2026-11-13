@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKe
 from bot import db
 from bot.app_state import PANIC_PASSWORD_TTL_SEC
 from bot.app_state import manager
+from bot.game import DISPLAY_NAME_MAX_LEN
 from bot.app_state import panic_password_pending
 from bot.app_state import waiting_join_user_ids
 from bot.app_state import waiting_myname_user_ids
@@ -646,6 +647,14 @@ async def mason_force_finish_night_message(msg: Message, bot: Bot) -> None:
     from bot.mason_force_finish_night import handle_mason_force_finish_text
 
     await handle_mason_force_finish_text(msg, bot, msg.from_user.id)
+    from bot.mozakere_force_finish_night import (
+        handle_mozakere_force_finish_text,
+    )
+
+    await handle_mozakere_force_finish_text(msg, bot, msg.from_user.id)
+    from bot.nam10.night_force_finish import handle_nam10_force_finish_text
+
+    await handle_nam10_force_finish_text(msg, bot, msg.from_user.id)
 
 
 @router.message(Command("status"))

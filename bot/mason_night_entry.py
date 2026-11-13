@@ -50,6 +50,7 @@ def reset_mason_current_night_selections(game: Game) -> None:
     ms_nat.clear_mason_natasha_night_state(game)
     ms_pr.clear_mason_priest_night_state(game)
     ms_nato.clear_mason_nato_night_state(game)
+    game.mason_night_detective_pending_uid = None
 
 
 def reset_mason_night_panel_state(game: Game) -> None:

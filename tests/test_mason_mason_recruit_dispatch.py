@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.game import GameManager, is_synthetic_player_uid
 from bot.mason_night_role import (
+    MSM_CONFIRM,
     MSM_NONE,
     MSM_TAILOR,
     dispatch_mason_mason_recruit_panel,
@@ -188,6 +189,12 @@ class MasonRecruitDispatchTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
         ):
             await dispatch_mason_night_role(
                 cb,
@@ -200,6 +207,26 @@ class MasonRecruitDispatchTests(unittest.IsolatedAsyncioTestCase):
                 tid=0,
             )
 
+        # انتخاب موقت — بدون READY
+        self.assertFalse(game.mason_night_mason_confirmed)
+        self.assertTrue(game.mason_mason_night_no_recruit)
+        with patch(
+            "bot.mason_night_role.finalize_no_host_role_pick_message",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_ready.maybe_finish_mason_parallel_night",
+            new=AsyncMock(),
+        ):
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=mason.user_id,
+                actor_uid=mason.user_id,
+                act=MSM_CONFIRM,
+                tid=0,
+            )
         self.assertTrue(game.mason_night_mason_confirmed)
         self.assertTrue(game.mason_mason_night_no_recruit)
 
@@ -223,6 +250,12 @@ class MasonRecruitDispatchTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
         ):
             await dispatch_mason_night_role(
                 cb,
@@ -235,6 +268,29 @@ class MasonRecruitDispatchTests(unittest.IsolatedAsyncioTestCase):
                 tid=tailor.user_id,
             )
 
+        # انتخاب موقت تایلر زنده — بدون جذب و بدون READY
+        self.assertFalse(game.mason_night_mason_confirmed)
+        self.assertEqual(game.mason_pending_recruit_uid, tailor.user_id)
+        with patch(
+            "bot.mason_recruit_delivery.deliver_mason_recruit_membership_message",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.finalize_no_host_role_pick_message",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_ready.maybe_finish_mason_parallel_night",
+            new=AsyncMock(),
+        ):
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=mason.user_id,
+                actor_uid=mason.user_id,
+                act=MSM_CONFIRM,
+                tid=0,
+            )
         self.assertTrue(game.mason_night_mason_confirmed)
         self.assertEqual(game.mason_pending_recruit_uid, tailor.user_id)
 
@@ -273,6 +329,12 @@ class MasonRecruitDispatchTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
         ):
             await dispatch_mason_night_role(
                 cb,
@@ -284,7 +346,24 @@ class MasonRecruitDispatchTests(unittest.IsolatedAsyncioTestCase):
                 act=MSM_NONE,
                 tid=0,
             )
-
+        self.assertFalse(game.mason_night_mason_confirmed)
+        with patch(
+            "bot.mason_night_role.finalize_no_host_role_pick_message",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_ready.maybe_finish_mason_parallel_night",
+            new=AsyncMock(),
+        ):
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=syn,
+                actor_uid=999,
+                act=MSM_CONFIRM,
+                tid=0,
+            )
         self.assertTrue(game.mason_night_mason_confirmed)
 
 

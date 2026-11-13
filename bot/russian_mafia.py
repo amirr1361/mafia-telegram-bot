@@ -236,10 +236,13 @@ def reset_russian_night_actions(game: Game) -> None:
     game.russian_mafia_detective_target = None
     game.russian_mafia_detective_confirmed = False
     game.russian_mafia_detective_alignment = None
+    game.russian_mafia_panels_pending.clear()  # انتخاب‌های در انتظار تأیید شب پاک می‌شوند
 
 
 def reset_russian_day_actions(game: Game) -> None:
+    game.russian_mafia_panels_pending.clear()
     game.russian_mafia_terror_day_active = False
+    game.russian_mafia_terror_stage = 0
     game.russian_mafia_terror_target = None
     game.russian_mafia_terror_confirmed = False
 

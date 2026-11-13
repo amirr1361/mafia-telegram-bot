@@ -178,7 +178,10 @@ class NoHostFullFlowSimulationTests(unittest.IsolatedAsyncioTestCase):
                 "no_exit",
                 source="nhd",
             )
-        self.assertIsNone(h.game.no_host_day1_defense_phase)
+        # Room 97: «خروجی نداشتیم» is a tentative selection in Bazpors —
+        # the dispatch must never raise and must not advance the day.
+        self.assertEqual(h.game.no_host_day1_defense_phase, "outcome")
+        self.assertTrue(h.game.no_host_day1_pending_no_elim)
 
 
 class NoHostNaturalEndSimulationTests(unittest.IsolatedAsyncioTestCase):

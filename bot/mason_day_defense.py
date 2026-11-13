@@ -13,7 +13,9 @@ def _defense_candidate_display_name(uid: int, game: Game) -> str:
     p = game.players.get(uid)
     if p is None:
         return str(uid)
-    return p.full_name or str(uid)
+    from bot.app_state import custom_display_name
+
+    return custom_display_name(uid) or p.full_name or str(uid)
 
 
 def build_mason_defense_candidates_announcement_html(game: Game) -> str:

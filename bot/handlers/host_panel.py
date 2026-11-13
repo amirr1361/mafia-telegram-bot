@@ -413,7 +413,17 @@ async def host_panel_cb(
         return
 
     if act == "pr":
-        if game.scenario_name not in ("bazpors", "mozakere", "masoon", "russian_mafia"):
+        if game.scenario_name == "namayande":
+            from bot.room_mode import is_namayande10_no_host_room
+
+            if not is_namayande10_no_host_room(game):
+                await safe_callback_answer(
+                    callback,
+                    "این گزینه برای این سناریو فعال نیست.",
+                    show_alert=True,
+                )
+                return
+        elif game.scenario_name not in ("bazpors", "mozakere", "masoon", "russian_mafia"):
             await safe_callback_answer(
                 callback,
                 "این گزینه برای این سناریو فعال نیست.",
@@ -444,6 +454,14 @@ async def host_panel_cb(
 
             err = start_russian_role_pick(game)
             dispatch = dispatch_russian_role_pick_panels
+        elif game.scenario_name == "namayande":
+            from bot.nam10.roles_player_pick import (
+                dispatch_player_role_pick_panels as dispatch_nam10_role_pick_panels,
+                start_player_role_pick as start_nam10_role_pick,
+            )
+
+            err = start_nam10_role_pick(game)
+            dispatch = dispatch_nam10_role_pick_panels
         else:
             err = start_mason_role_pick(game)
             dispatch = dispatch_mason_role_pick_panels

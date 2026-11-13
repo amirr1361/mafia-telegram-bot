@@ -1,4 +1,4 @@
-"""Shared player-selected role-number distribution (Bazpors / Mozakere / Mason)."""
+"""Shared player-selected role-number distribution (Bazpors / Mozakere / Mason / Namayande-10 fork)."""
 
 from __future__ import annotations
 
@@ -77,6 +77,7 @@ def any_player_role_pick_active(game: Game) -> bool:
         or getattr(game, "mozakere_player_role_pick_active", False)
         or getattr(game, "mason_player_role_pick_active", False)
         or getattr(game, "russian_mafia_player_role_pick_active", False)
+        or getattr(game, "nam10_player_role_pick_active", False)
     )
 
 

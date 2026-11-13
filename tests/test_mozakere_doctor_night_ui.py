@@ -1,4 +1,4 @@
-"""پنل شب پزشک — سناریوی مذاکره (دو مرحله‌ای شب ۱–۳)."""
+"""پنل شب پزشک — سناریوی مذاکره (انتظار چندانتخابی + تأیید نهایی)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from bot.game import GameManager
 from bot.models import Player, Role
 from bot.no_host_doctor_night import (
-    _mozakere_dual_pick_step,
     _pick_pool_for_keyboard,
     build_no_host_doctor_finalized_pick_html,
     build_no_host_doctor_pick_html,
@@ -29,11 +28,11 @@ def _p(uid: int, name: str, role: Role, *, seat: int | None = None) -> Player:
     )
 
 
-def _mozakere_no_host(gm: GameManager, *, night: int = 1):
+def _mozakere_no_host(gm: GameManager, *, night: int = 1, max_players: int = 12):
     game = gm.create_game(
         host_id=1,
         scenario_name="mozakere",
-        max_players=12,
+        max_players=max_players,
         bazpors_host_mode="no_host",
     )
     assert game is not None
@@ -42,77 +41,61 @@ def _mozakere_no_host(gm: GameManager, *, night: int = 1):
     return game
 
 
+def _full_cast(gm: GameManager, game) -> None:
+    gm.add_player(game, _p(10, "Doc", Role.DOCTOR, seat=1))
+    gm.add_player(game, _p(20, "A", Role.CITIZEN, seat=2))
+    gm.add_player(game, _p(30, "B", Role.CITIZEN, seat=3))
+    for i in range(6):
+        gm.add_player(game, _p(40 + i, f"F{i}", Role.CITIZEN))
+
+
+def _small_cast(gm: GameManager, game) -> None:
+    """۷ نفر زنده → ظرفیت نجات ۱ (doctor_save_capacity_for_alive_count)."""
+    gm.add_player(game, _p(10, "Doc", Role.DOCTOR, seat=1))
+    for i in range(6):
+        gm.add_player(game, _p(20 + i, f"P{i}", Role.CITIZEN, seat=2 + i))
+
+
 class MozakereDoctorNightPanelHtmlTests(unittest.TestCase):
     def setUp(self) -> None:
         self.gm = GameManager()
 
-    def test_night_1_first_pick_panel_text(self) -> None:
+    def test_unified_multi_select_text(self) -> None:
         game = _mozakere_no_host(self.gm, night=1)
-        for i in range(8):
-            self.gm.add_player(game, _p(100 + i, f"P{i}", Role.CITIZEN, seat=i + 2))
+        _full_cast(self.gm, game)
         html_msg = build_no_host_doctor_pick_html(game)
         self.assertIn("شب اول", html_msg)
-        self.assertIn("نفر اول", html_msg)
-        self.assertIn("تا ۲ نجات", html_msg)
-        self.assertIn("۰ از ۲", html_msg)
-
-    def test_night_2_first_pick_panel_text(self) -> None:
-        game = _mozakere_no_host(self.gm, night=2)
-        for i in range(8):
-            self.gm.add_player(game, _p(100 + i, f"P{i}", Role.CITIZEN, seat=i + 2))
-        html_msg = build_no_host_doctor_pick_html(game)
-        self.assertIn("شب دوم", html_msg)
-        self.assertIn("نفر اول", html_msg)
-
-    def test_second_pick_panel_after_first_saved(self) -> None:
-        game = _mozakere_no_host(self.gm, night=1)
-        self.gm.add_player(game, _p(10, "Doc", Role.DOCTOR, seat=1))
-        self.gm.add_player(game, _p(20, "A", Role.CITIZEN, seat=2))
-        self.gm.add_player(game, _p(30, "B", Role.CITIZEN, seat=3))
-        for i in range(6):
-            self.gm.add_player(game, _p(40 + i, f"F{i}", Role.CITIZEN))
-        dr.commit_pick(game, 20)
-        self.assertEqual(_mozakere_dual_pick_step(game), 2)
-        html_msg = build_no_host_doctor_pick_html(game)
-        self.assertIn("نفر دوم", html_msg)
+        self.assertIn("۲ نفر", html_msg)
         self.assertNotIn("نفر اول", html_msg)
+        self.assertNotIn("نفر دوم", html_msg)
 
-    def test_few_alive_single_pick_panel(self) -> None:
-        game = _mozakere_no_host(self.gm, night=4)
-        self.gm.add_player(game, _p(10, "Doc", Role.DOCTOR, seat=1))
-        self.gm.add_player(game, _p(20, "A", Role.CITIZEN, seat=2))
+    def test_single_capacity_text(self) -> None:
+        game = _mozakere_no_host(self.gm, night=4, max_players=10)
+        _small_cast(self.gm, game)
         html_msg = build_no_host_doctor_pick_html(game)
         self.assertIn("شب ۴", html_msg)
         self.assertIn("یک نفر", html_msg)
         self.assertNotIn("نفر اول", html_msg)
-        self.assertNotIn("نفر دوم", html_msg)
 
 
 class MozakereDoctorNightPoolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.gm = GameManager()
 
-    def test_second_pick_pool_excludes_first_target(self) -> None:
+    def test_pending_target_stays_in_pool(self) -> None:
         game = _mozakere_no_host(self.gm, night=1)
-        self.gm.add_player(game, _p(10, "Doc", Role.DOCTOR, seat=1))
-        self.gm.add_player(game, _p(20, "A", Role.CITIZEN, seat=2))
-        self.gm.add_player(game, _p(30, "B", Role.CITIZEN, seat=3))
-        for i in range(6):
-            self.gm.add_player(game, _p(40 + i, f"F{i}", Role.CITIZEN))
-        dr.commit_pick(game, 20)
+        _full_cast(self.gm, game)
+        game.no_host_doctor_pending_save_uids = [20]
         pool_ids = {p.user_id for p in _pick_pool_for_keyboard(game)}
-        self.assertNotIn(20, pool_ids)
+        self.assertIn(20, pool_ids)
         self.assertIn(10, pool_ids)
         self.assertIn(30, pool_ids)
 
-    def test_first_pick_pool_includes_all_alive(self) -> None:
+    def test_full_pool_includes_all_alive(self) -> None:
         game = _mozakere_no_host(self.gm, night=3)
-        self.gm.add_player(game, _p(10, "Doc", Role.DOCTOR, seat=1))
-        self.gm.add_player(game, _p(20, "A", Role.CITIZEN, seat=2))
-        for i in range(7):
-            self.gm.add_player(game, _p(30 + i, f"F{i}", Role.CITIZEN))
+        _full_cast(self.gm, game)
         pool_ids = {p.user_id for p in _pick_pool_for_keyboard(game)}
-        self.assertEqual(pool_ids, {10, 20, 30, 31, 32, 33, 34, 35, 36})
+        self.assertEqual(pool_ids, {10, 20, 30, 40, 41, 42, 43, 44, 45})
 
 
 class BazporsDoctorPanelUnchangedTests(unittest.TestCase):
@@ -130,7 +113,7 @@ class BazporsDoctorPanelUnchangedTests(unittest.TestCase):
         self.assertIn("یک نفر", html_msg)
         self.assertIn("حداکثر دو بار", html_msg)
         self.assertNotIn("نفر اول", html_msg)
-        self.assertNotIn("تا ۲ نجات", html_msg)
+        self.assertNotIn("تا ۲ نفر", html_msg)
 
 
 class MozakereDoctorNightDispatchTests(unittest.IsolatedAsyncioTestCase):
@@ -171,41 +154,105 @@ class MozakereDoctorNightDispatchTests(unittest.IsolatedAsyncioTestCase):
                 act=act,
                 tid=tid,
             )
+        return callback
 
-    async def test_none_on_first_step_clears_saves(self) -> None:
+    async def test_pick_stays_pending_until_confirm(self) -> None:
         game = _mozakere_no_host(self.gm, night=1)
-        self.gm.add_player(game, _p(10, "Doc", Role.DOCTOR))
-        for i in range(8):
-            self.gm.add_player(game, _p(100 + i, f"P{i}", Role.CITIZEN))
+        _full_cast(self.gm, game)
+        await self._dispatch(game, act="dkt", tid=20)
+        self.assertEqual(game.no_host_doctor_pending_save_uids, [20])
+        self.assertFalse(game.no_host_doctor_pick_confirmed)
+        self.assertEqual(doctor_night_state(game).get_save_uids(), [])
+
+    async def test_two_picks_pending_then_confirm_commits_once(self) -> None:
+        game = _mozakere_no_host(self.gm, night=3)
+        _full_cast(self.gm, game)
+        await self._dispatch(game, act="dkt", tid=20)
+        await self._dispatch(game, act="dkt", tid=30)
+        self.assertEqual(game.no_host_doctor_pending_save_uids, [20, 30])
+        self.assertFalse(game.no_host_doctor_pick_confirmed)
+        await self._dispatch(game, act="dkc")
+        self.assertEqual(doctor_night_state(game).get_save_uids(), [20, 30])
+        self.assertTrue(game.no_host_doctor_pick_confirmed)
+        self.assertEqual(game.no_host_doctor_pending_save_uids, [])
+
+    async def test_toggle_deselects(self) -> None:
+        game = _mozakere_no_host(self.gm, night=3)
+        _full_cast(self.gm, game)
+        await self._dispatch(game, act="dkt", tid=20)
+        await self._dispatch(game, act="dkt", tid=30)
+        await self._dispatch(game, act="dkt", tid=20)
+        self.assertEqual(game.no_host_doctor_pending_save_uids, [30])
+
+    async def test_capacity_two_rejects_third(self) -> None:
+        # ۱۰ بازیکن زنده → ظرفیت ۲ (doctor_save_capacity_for_alive_count)
+        game = _mozakere_no_host(self.gm, night=3)
+        _full_cast(self.gm, game)
+        await self._dispatch(game, act="dkt", tid=20)
+        await self._dispatch(game, act="dkt", tid=30)
+        callback = await self._dispatch(game, act="dkt", tid=40)
+        self.assertEqual(game.no_host_doctor_pending_save_uids, [20, 30])
+        callback.answer.assert_called()
+
+    async def test_capacity_three_accepts_three(self) -> None:
+        # ۱۲ بازیکن زنده → ظرفیت ۳
+        game = _mozakere_no_host(self.gm, night=3)
+        self.gm.add_player(game, _p(10, "Doc", Role.DOCTOR, seat=1))
+        for i in range(11):
+            self.gm.add_player(game, _p(20 + i, f"P{i}", Role.CITIZEN, seat=2 + i))
+        await self._dispatch(game, act="dkt", tid=20)
+        await self._dispatch(game, act="dkt", tid=21)
+        await self._dispatch(game, act="dkt", tid=22)
+        callback = await self._dispatch(game, act="dkt", tid=23)
+        self.assertEqual(
+            game.no_host_doctor_pending_save_uids, [20, 21, 22]
+        )
+        callback.answer.assert_called()
+
+    async def test_capacity_one_replaces(self) -> None:
+        game = _mozakere_no_host(self.gm, night=4, max_players=10)
+        _small_cast(self.gm, game)
+        await self._dispatch(game, act="dkt", tid=20)
+        await self._dispatch(game, act="dkt", tid=21)
+        self.assertEqual(game.no_host_doctor_pending_save_uids, [21])
+
+    async def test_none_pending_then_confirm(self) -> None:
+        game = _mozakere_no_host(self.gm, night=1)
+        _full_cast(self.gm, game)
+        await self._dispatch(game, act="dkt", tid=20)
         await self._dispatch(game, act="dkn")
+        self.assertTrue(game.no_host_doctor_pending_none)
+        self.assertEqual(game.no_host_doctor_pending_save_uids, [])
+        await self._dispatch(game, act="dkc")
         self.assertEqual(doctor_night_state(game).get_save_uids(), [])
         self.assertTrue(game.no_host_doctor_pick_confirmed)
 
-    async def test_first_pick_then_none_keeps_first_only(self) -> None:
-        game = _mozakere_no_host(self.gm, night=2)
-        self.gm.add_player(game, _p(10, "Doc", Role.DOCTOR))
-        self.gm.add_player(game, _p(20, "A", Role.CITIZEN))
-        self.gm.add_player(game, _p(30, "B", Role.CITIZEN))
-        for i in range(6):
-            self.gm.add_player(game, _p(40 + i, f"F{i}", Role.CITIZEN))
-        await self._dispatch(game, act="dkt", tid=20)
-        self.assertFalse(game.no_host_doctor_pick_confirmed)
-        self.assertEqual(doctor_night_state(game).get_save_uids(), [20])
-        await self._dispatch(game, act="dkn")
-        self.assertEqual(doctor_night_state(game).get_save_uids(), [20])
-        self.assertTrue(game.no_host_doctor_pick_confirmed)
-
-    async def test_two_picks_stored_in_state(self) -> None:
+    async def test_target_clears_none_pending(self) -> None:
         game = _mozakere_no_host(self.gm, night=3)
-        self.gm.add_player(game, _p(10, "Doc", Role.DOCTOR))
-        self.gm.add_player(game, _p(20, "A", Role.CITIZEN))
-        self.gm.add_player(game, _p(30, "B", Role.CITIZEN))
-        for i in range(6):
-            self.gm.add_player(game, _p(40 + i, f"F{i}", Role.CITIZEN))
+        _full_cast(self.gm, game)
+        await self._dispatch(game, act="dkn")
+        self.assertTrue(game.no_host_doctor_pending_none)
+        await self._dispatch(game, act="dkt", tid=20)
+        self.assertFalse(game.no_host_doctor_pending_none)
+        self.assertEqual(game.no_host_doctor_pending_save_uids, [20])
+
+    async def test_confirm_without_selection_alerts(self) -> None:
+        game = _mozakere_no_host(self.gm, night=1)
+        _full_cast(self.gm, game)
+        callback = await self._dispatch(game, act="dkc")
+        self.assertFalse(game.no_host_doctor_pick_confirmed)
+        callback.answer.assert_called()
+
+    async def test_no_readiness_from_tentative_selection(self) -> None:
+        from bot.no_host_night_ready import _doctor_ready
+
+        game = _mozakere_no_host(self.gm, night=3)
+        _full_cast(self.gm, game)
         await self._dispatch(game, act="dkt", tid=20)
         await self._dispatch(game, act="dkt", tid=30)
-        self.assertEqual(doctor_night_state(game).get_save_uids(), [20, 30])
-        self.assertTrue(game.no_host_doctor_pick_confirmed)
+        self.assertFalse(_doctor_ready(game))
+        await self._dispatch(game, act="dkc")
+        self.assertTrue(_doctor_ready(game))
 
 
 class MozakereDoctorFinalizedPickHtmlTests(unittest.TestCase):
@@ -395,3 +442,7 @@ class MozakereNightReportDoctorTests(unittest.TestCase):
 
         self.assertIn("💉 نجات پزشک:", report)
         self.assertIn("A", report)
+
+
+if __name__ == "__main__":
+    unittest.main()

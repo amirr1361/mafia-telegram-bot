@@ -66,8 +66,11 @@ def commit_pick(
                 "منفی (شهروندی) نشان بده."
             )
         else:
+            from bot.app_state import custom_display_name
+
             detective_night_state(game).last_answer = (
-                f"هدف شیاد «{tgt.full_name or target_uid}» است."
+                f"هدف شیاد «"
+                f"{custom_display_name(target_uid) or tgt.full_name or target_uid}» است."
             )
     return False
 

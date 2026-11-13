@@ -203,10 +203,18 @@ async def _resume_no_host_path_after_skip(
 
 
 async def _notify_semi_auto_host_after_handoff(
-    bot: Bot, game: Game, new_host_uid: int
+    bot: Bot, game: Game, gm: "GameManager", new_host_uid: int
 ) -> None:
     p = game.players.get(new_host_uid)
-    name = html.escape(p.full_name) if p else "گرداننده"
+    name = (
+        html.escape(
+            gm.get_user_display_name(
+                new_host_uid, p.full_name if p else "گرداننده"
+            )
+        )
+        if p is not None
+        else "گرداننده"
+    )
     await safe_send_message(
         bot,
         new_host_uid,
@@ -224,7 +232,7 @@ async def _resume_semi_auto_after_pick(
     bot: Bot, game: Game, gm: "GameManager", gate: str
 ) -> None:
     new_host_uid = game.host_id
-    await _notify_semi_auto_host_after_handoff(bot, game, new_host_uid)
+    await _notify_semi_auto_host_after_handoff(bot, game, gm, new_host_uid)
     if gate == GATE_DAY1_AFTER_ELIM:
         if game.bazpors_alive_at_day_start is None:
             game.bazpors_alive_at_day_start = {

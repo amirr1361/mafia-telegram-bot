@@ -221,6 +221,9 @@ class NoHostFlowHarness:
 
     async def day1_no_defense(self) -> None:
         await self.dispatch_defense("none")
+        # بازپرس: تأیید دومرحله‌ای «دفاعیه نداریم».
+        if self.game.no_host_day1_defense_none_confirm_active:
+            await self.dispatch_defense("nonc")
 
     async def day1_defense_pick_and_confirm(self, defender_uids: Iterable[int]) -> None:
         for uid in defender_uids:
@@ -229,6 +232,9 @@ class NoHostFlowHarness:
 
     async def day1_no_exit(self) -> None:
         await self.dispatch_defense("no_exit")
+        # بازپرس (Room 97): «خروجی نداشتیم» انتخاب موقتی است — تأیید سبز لازم.
+        if self.game.no_host_day1_pending_no_elim:
+            await self.dispatch_defense("elim_yes")
 
     async def day1_eliminate(self, target_uid: int) -> None:
         await self.dispatch_defense("d1el", tid=target_uid)

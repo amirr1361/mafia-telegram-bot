@@ -70,6 +70,7 @@ def reset_no_host_day_vote_prompt_state(game: Game) -> None:
     game.no_host_day1_defense_active = False
     game.no_host_day1_defense_phase = None
     game.no_host_day1_pending_elim_uid = None
+    game.no_host_day1_pending_no_elim = False
 
 
 def clear_no_host_day_mirror_prompts(game: Game) -> None:
@@ -153,6 +154,14 @@ async def send_no_host_day_vote_prompt(bot: Bot, game: Game) -> None:
     if game.bazpors_ki_as_today:
         return
     if game.bot_assistant_user_id is None:
+        return
+    # Room 97 regression guard: the end-of-day vote / defence-selection
+    # panel must never be delivered while the status inquiry
+    # («استعلام وضعیت میز») is still pending — the inquiry resolves first
+    # and the day start happens only after that.
+    from bot.no_host_table_inquiry import NO_HOST_TABLE_INQUIRY
+
+    if game.bazpors_narrator_step == NO_HOST_TABLE_INQUIRY:
         return
     assistant_uid = game.bot_assistant_user_id
     if assistant_uid is None or game.no_host_day1_vote_prompt_sent:

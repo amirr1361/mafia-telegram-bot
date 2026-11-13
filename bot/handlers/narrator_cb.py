@@ -435,6 +435,32 @@ async def _post_process_assistant_panel(
                             msg.chat.id,
                             msg.message_id,
                         )
+        elif (
+            game.bazpors_narrator_step != NO_HOST_INTERROG_DAY
+            or manager.get_game(game.room_code) is None
+        ):
+            # Room 97: the result is committed exactly once — close the
+            # original interactive vote panel (delete where possible) and
+            # answer the helper with a short non-interactive ack that
+            # carries no inline keyboard.
+            from bot.bazpors_narrator import (
+                build_no_host_interrog_result_ack_text,
+                close_no_host_interrog_vote_panel_after_commit,
+            )
+
+            await close_no_host_interrog_vote_panel_after_commit(
+                bot, game, callback.message
+            )
+            ack = build_no_host_interrog_result_ack_text(
+                game, manager, pending_vote
+            )
+            await safe_send_message(
+                bot,
+                narrator_operator_user_id(game),
+                ack,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
         else:
             await refresh_host_message_after_callback(
                 bot,
@@ -522,6 +548,20 @@ async def bazpors_narrator_cb(
         await safe_callback_answer(callback, "فقط در چت خصوصی.", show_alert=True)
         return
     game = manager.get_game(callback_data.code)
+    from bot.room_mode import (
+        is_namayande10_no_host_room,
+        is_namayande10_semi_auto_room,
+    )
+
+    if game is not None and (
+        is_namayande10_no_host_room(game) or is_namayande10_semi_auto_room(game)
+    ):
+        from bot.nam10.nmnd_narrator_cb import (
+            nmnd_narrator_cb as _nam10_narr_cb,
+        )
+
+        await _nam10_narr_cb(callback, callback_data, bot)
+        return
     if not game or not narrator_callback_user_may_act(
         game, callback.from_user.id
     ):

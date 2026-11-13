@@ -20,13 +20,17 @@ from bot.roles.registry import require_role_module
 _hunter_role = require_role_module(Role.HUNTER)
 from bot.game import is_synthetic_player_uid
 from bot.models import Game, Player
+from bot.roles.night_state import hunter_night_state
 from bot.roles.registry import find_alive_role_holder
 from bot.no_host_role_pick_common import (
+    append_pending_selection_line,
     build_confirm_cancel_keyboard,
     build_pick_keyboard,
     sync_role_mirror_panel,
+    with_inline_confirm_row,
 )
 from bot.observer_delivery import (
+    PlayerMirrorCb,
     deliver_no_host_player_game_copy,
     mirror_ui_claim_key,
     no_host_observer_registered,
@@ -93,6 +97,67 @@ def _hunter_night1_ui_key(game: Game, hunter_uid: int) -> str:
     return mirror_ui_claim_key(game.room_code, "night1_hunter", hunter_uid)
 
 
+def _bazpors_hunter_styles_enabled(game: Game) -> bool:
+    """Bazpors-only cosmetic button styling; every other scenario keeps the default style."""
+    return game.scenario_name == "bazpors"
+
+
+def _bazpors_hunter_confirm_flow(game: Game) -> bool:
+    """Bazpors-only behaviour gate: «به کسی وصل نمی‌شوم» is a tentative
+    pick too and commits only through the green «hnc» confirm (the
+    previous behaviour — instant finalize on «hns» — stays for every
+    other scenario)."""
+    return game.scenario_name == "bazpors"
+
+
+def _hunter_panel_selected_uid(game: Game) -> int | None:
+    """Bazpors styling helper — current selection (pending pick wins over committed link)."""
+    pending = game.no_host_hunter_pending_pick_uid
+    if pending is not None:
+        return pending
+    state = hunter_night_state(game)
+    if state.linked_this_night:
+        return state.link_uid
+    return None
+
+
+def _hunter_style_pick_buttons(
+    kb: InlineKeyboardMarkup,
+    hunter_uid: int,
+    selected_uid: int | None,
+    *,
+    none_selected: bool = False,
+) -> InlineKeyboardMarkup:
+    """Cosmetic only — blue for selection buttons, red for the tentative selection."""
+    for row in kb.inline_keyboard:
+        for btn in row:
+            if btn.callback_data is None:
+                continue
+            try:
+                cb = PlayerMirrorCb.unpack(btn.callback_data)
+            except Exception:
+                continue
+            if cb.act == "hns":
+                # «به کسی وصل نمی‌شوم» — red while it is the tentative pick.
+                btn.style = "danger" if none_selected else "primary"
+            elif cb.act == "hnp" and cb.as_uid == hunter_uid:
+                if selected_uid is not None and cb.tid == selected_uid:
+                    btn.style = "danger"
+                else:
+                    btn.style = "primary"
+    return kb
+
+
+def _hunter_pending_line(game: Game, gm: "GameManager") -> str:
+    if getattr(game, "no_host_hunter_pending_none", False):
+        return "⭕ انتخاب فعلی: <b>به کسی وصل نمی‌شوم</b>"
+    tid = game.no_host_hunter_pending_pick_uid
+    if tid is not None:
+        tag = html.escape(gm.format_player_tag(game.players.get(tid))[:28])
+        return f"🏹 انتخاب فعلی: <b>{tag}</b>"
+    return "🏹 انتخاب فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
+
+
 def _hunter_pick_keyboard(
     game: Game, hunter_uid: int, gm: "GameManager"
 ) -> InlineKeyboardMarkup:
@@ -105,26 +170,43 @@ def _hunter_pick_keyboard(
     def _label(p: Player) -> str:
         return html.escape(gm.format_player_tag(p)[:28])
 
-    return build_pick_keyboard(
+    kb = build_pick_keyboard(
         game,
         hunter_uid,
         pick_act="hnp",
+        scenario_styles=False,
         players=pool,
         none_act="hns",
         none_text="⭕ به کسی وصل نمی‌شوم",
         label_for_player=_label,
     )
+    if _bazpors_hunter_styles_enabled(game):
+        kb = _hunter_style_pick_buttons(
+            kb,
+            hunter_uid,
+            _hunter_panel_selected_uid(game),
+            none_selected=bool(game.no_host_hunter_pending_none),
+        )
+        # تأیید سبز از رندر اولیه — وصل شدن فقط با تأیید نهایی ثبت می‌شود.
+        kb = with_inline_confirm_row(game, hunter_uid, kb, confirm_act="hnc")
+    return kb
 
 
 def _hunter_confirm_keyboard(game: Game, hunter_uid: int) -> InlineKeyboardMarkup:
-    return build_confirm_cancel_keyboard(
+    kb = build_confirm_cancel_keyboard(
         game,
         hunter_uid,
         confirm_act="hnc",
+        scenario_styles=False,
         back_act="hnb",
         confirm_text="🔹 بله، تأیید انتخاب",
         back_text="🔹 بازگشت و تصحیح انتخاب",
     )
+    if _bazpors_hunter_styles_enabled(game):
+        for row in kb.inline_keyboard:
+            for btn in row:
+                btn.style = "primary"
+    return kb
 
 
 def _apply_hunter_pick_to_game(game: Game, pick_uid: int | None) -> None:
@@ -142,6 +224,7 @@ async def _finalize_hunter_night1(
     game.no_host_night1_hunter_flow_active = False
     game.no_host_night1_hunter_done = True
     game.no_host_hunter_pending_pick_uid = None
+    game.no_host_hunter_pending_none = False
     game.no_host_hunter_awaiting_confirm = False
 
     _apply_hunter_pick_to_game(game, pick_uid)
@@ -152,7 +235,9 @@ async def _finalize_hunter_night1(
         _advance_after_hunter(game)
 
     hunter = find_alive_role_holder(game, Role.HUNTER)
-    if hunter and player_should_receive_game_messages(game, hunter.user_id):
+    # پنل آینه (حتی برای بازیکن مصنوعی/بیرون‌شده) همیشه بسته می‌شود تا نسخهٔ
+    # ناظر باز نماند؛ پیام‌رسانی خودِ بازیکن در مسیرهای دیگر همان‌طور است.
+    if hunter:
         from bot.no_host_night_common import (
             finalize_no_host_role_pick_message,
             format_night_selection_label,
@@ -206,8 +291,15 @@ async def start_no_host_night1_hunter_flow(
             _advance_after_hunter(game)
         return
 
+    # امضای شب — reconcile پنلِ ارسال‌شدهٔ همین شب را دوباره منتشر نمی‌کند
+    # (پنل یتیم ناظر رخ نمی‌دهد).
+    night_sig = f"{game.bazpors_narrator_night_count}:hunter:n1"
+    if game.no_host_hunter1_dm_signature == night_sig:
+        return
+    game.no_host_hunter1_dm_signature = night_sig
     game.no_host_night1_hunter_flow_active = True
     game.no_host_hunter_pending_pick_uid = None
+    game.no_host_hunter_pending_none = False
     game.no_host_hunter_awaiting_confirm = False
 
     if player_should_receive_game_messages(game, hunter.user_id):
@@ -288,10 +380,34 @@ async def dispatch_no_host_hunter_night1(
     ui_key = _hunter_night1_ui_key(game, hunter_uid)
 
     if act == "hnp":
-        if game.no_host_hunter_awaiting_confirm:
-            pass
         if tid == hunter_uid or tid not in game.players or not game.players[tid].is_alive:
             await callback.answer("انتخاب نامعتبر.", show_alert=True)
+            return
+        if _bazpors_hunter_styles_enabled(game):
+            game.no_host_hunter_pending_none = False
+            if game.no_host_hunter_pending_pick_uid == tid:
+                # زدن دوباره روی انتخاب فعلی = لغو انتخاب (بازگشت به لیست).
+                game.no_host_hunter_pending_pick_uid = None
+                game.no_host_hunter_awaiting_confirm = False
+                await callback.answer("انتخاب لغو شد.")
+                text = build_no_host_hunter_night1_pick_html(game)
+                kb = _hunter_pick_keyboard(game, hunter_uid, gm)
+                await sync_role_mirror_panel(
+                    bot, game, ui_key, hunter_uid, text, kb
+                )
+                return
+            game.no_host_hunter_pending_pick_uid = tid
+            game.no_host_hunter_awaiting_confirm = True
+            await callback.answer("انتخاب شد؛ تأیید کنید.")
+            # پنل انتخاب با انتخاب قرمز + تأیید سبز در همان صفحه.
+            text = append_pending_selection_line(
+                build_no_host_hunter_night1_pick_html(game),
+                [_hunter_pending_line(game, gm)],
+            )
+            kb = _hunter_pick_keyboard(game, hunter_uid, gm)
+            await sync_role_mirror_panel(
+                bot, game, ui_key, hunter_uid, text, kb
+            )
             return
         game.no_host_hunter_pending_pick_uid = tid
         game.no_host_hunter_awaiting_confirm = True
@@ -304,6 +420,28 @@ async def dispatch_no_host_hunter_night1(
         return
 
     if act == "hns":
+        if _bazpors_hunter_confirm_flow(game):
+            # بازپرس: «به کسی وصل نمی‌شوم» انتخاب موقتی است — قرمز روی همان
+            # پنل — و فقط با تأیید سبز «hnc» نهایی می‌شود.
+            if game.no_host_hunter_pending_none:
+                # زدن دوباره روی گزینهٔ فعلی = لغو انتخاب.
+                game.no_host_hunter_pending_none = False
+                game.no_host_hunter_awaiting_confirm = False
+                await callback.answer("انتخاب لغو شد.")
+            else:
+                game.no_host_hunter_pending_pick_uid = None
+                game.no_host_hunter_pending_none = True
+                game.no_host_hunter_awaiting_confirm = True
+                await callback.answer("انتخاب شد؛ تأیید کنید.")
+            text = append_pending_selection_line(
+                build_no_host_hunter_night1_pick_html(game),
+                [_hunter_pending_line(game, gm)],
+            )
+            kb = _hunter_pick_keyboard(game, hunter_uid, gm)
+            await sync_role_mirror_panel(
+                bot, game, ui_key, hunter_uid, text, kb
+            )
+            return
         game.no_host_hunter_pending_pick_uid = None
         game.no_host_hunter_awaiting_confirm = False
         await callback.answer("ثبت شد.")
@@ -312,6 +450,7 @@ async def dispatch_no_host_hunter_night1(
 
     if act == "hnb":
         game.no_host_hunter_pending_pick_uid = None
+        game.no_host_hunter_pending_none = False
         game.no_host_hunter_awaiting_confirm = False
         await callback.answer("بازگشت به لیست.")
         pick_text = build_no_host_hunter_night1_pick_html(game)
@@ -322,6 +461,12 @@ async def dispatch_no_host_hunter_night1(
         return
 
     if act == "hnc":
+        if _bazpors_hunter_confirm_flow(game) and game.no_host_hunter_pending_none:
+            # «به کسی وصل نمی‌شوم» فقط با تأیید سبز نهایی می‌شود.
+            game.no_host_hunter_pending_none = False
+            await callback.answer("تأیید شد.")
+            await _finalize_hunter_night1(bot, game, gm, None)
+            return
         pick = game.no_host_hunter_pending_pick_uid
         if pick is None or pick not in game.players:
             await callback.answer("ابتدا یک بازیکن انتخاب کنید.", show_alert=True)

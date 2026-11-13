@@ -15,17 +15,26 @@ from bot.mason_night_entry import (
 )
 from bot.mason_night_ready import all_mason_parallel_night_ready
 from bot.mason_night_role import (
+    MGD_CONFIRM,
     MGD_OK,
     MGD_PICK,
+    MGN_CONFIRM,
     MGN_NONE,
+    MSC_CONFIRM,
+    MSC_DEC_CONFIRM,
+    MSC_DEC_PICK,
     MSC_DONE,
     MSC_INFO_OK,
     MSC_NONE,
+    MSB_CONFIRM,
     MSB_OK,
     MSB_NONE,
+    MSD_CONFIRM,
     MSD_DONE,
     MSD_OK,
+    MSM_CONFIRM,
     MSM_NONE,
+    MSS_CONFIRM,
     MSS_NONE,
     MSS_OK,
     dispatch_mason_night_role,
@@ -404,6 +413,7 @@ class MasonSimHarness:
             sb_uid = self.holder_uid(Role.SABOTEUR)
             if ms_sb.mason_saboteur_needs_night_pick(g):
                 await self.click_role(as_uid=sb_uid, act=MSB_NONE)
+                await self.click_role(as_uid=sb_uid, act=MSB_CONFIRM)
             else:
                 await self.click_role(as_uid=sb_uid, act=MSB_OK)
         doc_uid = self.holder_uid(Role.DOCTOR)
@@ -412,12 +422,14 @@ class MasonSimHarness:
                 await self.click_role(as_uid=doc_uid, act=MSD_OK)
             else:
                 await self.click_role(as_uid=doc_uid, act=MSD_DONE)
+                await self.click_role(as_uid=doc_uid, act=MSD_CONFIRM)
         sn_uid = self.holder_uid(Role.SNIPER)
         if sn_uid is not None:
             from bot.roles import mason_sniper as ms_sn
 
             if ms_sn.mason_sniper_needs_night_pick(g):
                 await self.click_role(as_uid=sn_uid, act=MSS_NONE)
+                await self.click_role(as_uid=sn_uid, act=MSS_CONFIRM)
             else:
                 await self.click_role(as_uid=sn_uid, act=MSS_OK)
         cmd_uid = self.holder_uid(Role.COMMANDER)
@@ -429,15 +441,20 @@ class MasonSimHarness:
             elif ms_cmd.mason_commander_needs_sniper_no_shot_info_panel(g):
                 await self.click_role(as_uid=cmd_uid, act=MSC_INFO_OK)
             elif sn_uid is not None:
-                await self.click_role(as_uid=cmd_uid, act=MSC_NONE)
+                # حالت ب — رد تمام درخواست‌های شلیک + تأیید نهایی
+                await self.click_role(as_uid=cmd_uid, act=MSC_DEC_PICK, tid=9)
+                await self.click_role(as_uid=cmd_uid, act=MSC_DEC_CONFIRM)
             else:
+                # حالت الف — انتخاب موقت «انتخابی ندارم» + تأیید نهایی
                 await self.click_role(as_uid=cmd_uid, act=MSC_NONE)
+                await self.click_role(as_uid=cmd_uid, act=MSC_CONFIRM)
         gn_uid = self.holder_uid(Role.GUNMAN)
         if gn_uid is not None:
             from bot.roles import mason_gunner as ms_gn
 
             if ms_gn.mason_gunner_can_give_gun(g):
                 await self.click_role(as_uid=gn_uid, act=MGN_NONE)
+                await self.click_role(as_uid=gn_uid, act=MGN_CONFIRM)
             else:
                 await self.press_wait_ok(gn_uid)
         gd_uid = self.holder_uid(Role.BODYGUARD)
@@ -447,11 +464,14 @@ class MasonSimHarness:
             if ms_gd.mason_guardian_needs_night_pick(g):
                 tgt = self.first_town_target(exclude_uids=[gd_uid])
                 await self.click_role(as_uid=gd_uid, act=MGD_PICK, tid=tgt)
+                # انتخاب موقت — تأیید نهایی برای ثبت شب لازم است.
+                await self.click_role(as_uid=gd_uid, act=MGD_CONFIRM)
             else:
                 await self.click_role(as_uid=gd_uid, act=MGD_OK)
         ms_uid = self.holder_uid(Role.MASON)
         if ms_uid is not None:
             await self.click_role(as_uid=ms_uid, act=MSM_NONE)
+            await self.click_role(as_uid=ms_uid, act=MSM_CONFIRM)
         dt_uid = self.holder_uid(Role.DETECTIVE)
         if dt_uid is not None:
             tgt = self.first_town_target(exclude_uids=[dt_uid])

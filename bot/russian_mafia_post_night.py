@@ -10,6 +10,7 @@ import logging
 from aiogram import Bot
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.app_state import custom_display_name
 from bot.models import Game, Phase, Role
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ def _living_rows(game: Game) -> list[list[InlineKeyboardButton]]:
         seat = player.seat if player.seat is not None else player.user_id
         row.append(
             InlineKeyboardButton(
-                text=f"{seat}. {player.full_name}"[:40],
+                text=f"{seat}. {custom_display_name(player.user_id) or player.full_name}"[:40],
                 callback_data=f"rmh:{code}:disc_pick:{night}:{player.user_id}",
             )
         )
@@ -345,6 +346,13 @@ async def begin_russian_post_night(bot: Bot, game: Game) -> None:
     )
 
     night = game.russian_mafia_night_index
+    # شب حل شد — یادآور عمومی کمک‌کننده دیگر لازم نیست.
+    try:
+        from bot.night_helper_reminder import cleanup_night_helper_reminder
+
+        await cleanup_night_helper_reminder(bot, game)
+    except Exception:
+        pass
     if game.russian_mafia_night_result_sent_index == night:
         logger.info(
             "Russian Mafia room=%s night result already sent; skipping duplicate",

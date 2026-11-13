@@ -10,8 +10,10 @@ import logging
 from aiogram import Bot
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.app_state import custom_display_name
 from bot.game import is_synthetic_player_uid
 from bot.models import Game, Phase, Role
+from bot.player_role_pick_common import inline_button_supports_style
 from bot.observer_delivery import (
     PlayerMirrorCb,
     _try_edit_mirror_message,
@@ -44,6 +46,7 @@ from bot.russian_mafia import (
     reset_russian_night_actions,
     record_russian_elimination,
     ensure_russian_doctor_night_capacity,
+    russian_doctor_save_uids,
     russian_alive_player_count,
     russian_doctor_heal_capacity,
     russian_doctor_self_save_limit,
@@ -56,6 +59,18 @@ from bot.tg_send import safe_callback_answer, safe_send_message
 logger = logging.getLogger(__name__)
 
 _ROOM_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _button_style_kwargs(
+    *, selected: bool = False, success: bool = False, danger: bool = False
+) -> dict[str, str]:
+    if not inline_button_supports_style():
+        return {}
+    if success:
+        return {"style": "success"}
+    return {"style": "danger" if (selected or danger) else "primary"}
+
+
 _ACTS = frozenset({
     "zrm_shot",
     "zrm_doc",
@@ -70,6 +85,9 @@ _ACTS = frozenset({
     "zbk_det",
     "zbk_ter",
     "zrm_cit",
+    "zrt_go",
+    "zfin_ter",
+    "zcn_ter",
 })
 _SELECT_ACTS = {
     "zrm_shot": "mafia",
@@ -81,7 +99,7 @@ _CONFIRM_ACTS = {
     "zok_shot": "mafia",
     "zok_doc": "doctor",
     "zok_det": "detective",
-    "zok_ter": "terror",
+    "zfin_ter": "terror",
 }
 _BACK_ACTS = {
     "zbk_shot": "mafia",
@@ -135,7 +153,16 @@ def generation_from_callback_rid(rid: str | None) -> int | None:
 
 
 def _slot_for_act(act: str) -> str:
-    mapping = {**_SELECT_ACTS, **_CONFIRM_ACTS, **_BACK_ACTS, "zrm_ter": "terror"}
+    mapping = {
+        **_SELECT_ACTS,
+        **_CONFIRM_ACTS,
+        **_BACK_ACTS,
+        "zrm_ter": "terror",
+        "zok_ter": "terror",
+        "zfin_ter": "terror",
+        "zrt_go": "terror",
+        "zcn_ter": "terror",
+    }
     return mapping[act]
 
 
@@ -194,6 +221,9 @@ def _button(
     label: str,
     mirror: bool,
     generation: int,
+    selected: bool = False,
+    success: bool = False,
+    danger: bool = False,
 ):
     if mirror:
         data = PlayerMirrorCb(
@@ -205,7 +235,11 @@ def _button(
         ).pack()
     else:
         data = f"rmf:{game.room_code}:{act}:{as_uid}:{target_uid}:{generation}"
-    return InlineKeyboardButton(text=label[:40], callback_data=data)
+    return InlineKeyboardButton(
+        text=label[:40],
+        callback_data=data,
+        **_button_style_kwargs(selected=selected, success=success, danger=danger),
+    )
 
 
 def action_keyboard(
@@ -216,20 +250,31 @@ def action_keyboard(
     exclude: int | None,
     mirror: bool,
     exclude_uids: set[int] | frozenset[int] | None = None,
+    selected_uid: int | None = None,
+    selected_uids: list[int] | tuple[int, ...] | None = None,
+    confirm_label: str = "✅ تأیید انتخاب",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
+    multi_selected = (
+        {int(uid) for uid in selected_uids} if selected_uids else None
+    )
     for player in _alive_targets(game, exclude=exclude, exclude_uids=exclude_uids):
         seat = player.seat if player.seat is not None else player.user_id
+        if multi_selected is not None:
+            is_selected = player.user_id in multi_selected
+        else:
+            is_selected = player.user_id == selected_uid
         row.append(
             _button(
                 game,
                 act=act,
                 as_uid=as_uid,
                 target_uid=player.user_id,
-                label=f"{seat}. {player.full_name}",
+                label=f"{seat}. {custom_display_name(player.user_id) or player.full_name}",
                 mirror=mirror,
                 generation=_expected_generation(game, _slot_for_act(act)),
+                selected=is_selected,
             )
         )
         if len(row) == 2:
@@ -237,9 +282,31 @@ def action_keyboard(
             row = []
     if row:
         rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows or [[
-        InlineKeyboardButton(text="هدف زنده‌ای نیست", callback_data="noop")
-    ]])
+    if not rows:
+        rows = [
+            [
+                InlineKeyboardButton(text="هدف زنده‌ای نیست", callback_data="noop")
+            ]
+        ]
+    confirm_act = "zok_" + act[4:]
+    confirm_tid = selected_uid or (
+        min(multi_selected) if multi_selected else 0
+    )
+    rows.append(
+        [
+            _button(
+                game,
+                act=confirm_act,
+                as_uid=as_uid,
+                target_uid=confirm_tid,
+                label=confirm_label,
+                mirror=mirror,
+                generation=_expected_generation(game, _slot_for_act(act)),
+                success=True,
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def parse_player_action(data: str) -> tuple[str, str, int, int, int | None] | None:
@@ -492,6 +559,10 @@ async def _send_pair(
     exclude: int | None,
     exclude_uids: set[int] | frozenset[int] | None = None,
 ) -> None:
+    _pending = getattr(game, "russian_mafia_panels_pending", None)
+    _pending_value = _pending.get(slot) if isinstance(_pending, dict) else None
+    _selected_uids = _pending_value if isinstance(_pending_value, list) else None
+    _selected_uid = None if _selected_uids else _pending_value
     player_kb = action_keyboard(
         game,
         act=act,
@@ -499,6 +570,8 @@ async def _send_pair(
         exclude=exclude,
         mirror=False,
         exclude_uids=exclude_uids,
+        selected_uid=_selected_uid,
+        selected_uids=_selected_uids,
     )
     observer_kb = action_keyboard(
         game,
@@ -507,6 +580,8 @@ async def _send_pair(
         exclude=exclude,
         mirror=True,
         exclude_uids=exclude_uids,
+        selected_uid=_selected_uid,
+        selected_uids=_selected_uids,
     )
     send_player = not is_synthetic_player_uid(player_uid)
     ui_key = _ui_key(game, slot)
@@ -540,12 +615,13 @@ async def _send_pair(
         )
 
 
-async def _close_existing_prompt(bot: Bot, game: Game, key: str) -> None:
+async def _close_existing_prompt(
+    bot: Bot, game: Game, key: str, *, text: str = "این اقدام بسته شد."
+) -> None:
     """فقط پیامِ موجود را می‌بندد. برای پنلِ هرگز ساخته‌نشده پیام تازه نمی‌فرستد."""
     entry = game.mirror_prompt_messages.get(key)
     if not isinstance(entry, dict):
         return
-    text = "این اقدام بسته شد."
     edited = False
     for role in ("player", "observer"):
         pair = _coerce_mirror_ref(entry.get(role))
@@ -564,11 +640,15 @@ async def _close_existing_prompt(bot: Bot, game: Game, key: str) -> None:
         entry["text"] = text
 
 
-async def _close_slot(bot: Bot, game: Game, slot: str) -> None:
+async def _close_slot(
+    bot: Bot, game: Game, slot: str, *, completion_text: str | None = None
+) -> None:
     current = _ui_key(game, slot)
     legacy = _legacy_ui_key(game.room_code, slot)
     for key in (current, current + ":obs", legacy, legacy + ":obs"):
-        await _close_existing_prompt(bot, game, key)
+        await _close_existing_prompt(
+            bot, game, key, text=completion_text or "این اقدام بسته شد."
+        )
 
 
 async def open_night(bot: Bot, game: Game) -> None:
@@ -620,6 +700,17 @@ async def open_night(bot: Bot, game: Game) -> None:
     )
     await send_russian_citizen_wait_panels(bot, game)
 
+    # یادآور عمومی شب کمک‌کننده (بدون دکمه اتمام شب).
+    try:
+        from bot.night_helper_reminder import schedule_night_helper_reminder
+
+        schedule_night_helper_reminder(bot, game)
+    except Exception:
+        logger.exception(
+            "russian night helper reminder schedule failed room=%s",
+            game.room_code,
+        )
+
 
 def _fa(n: int) -> str:
     return str(n).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹"))
@@ -656,10 +747,9 @@ def build_russian_doctor_pick_html(game: Game) -> str:
     alive = russian_alive_player_count(game)
     used = int(game.russian_mafia_doctor_self_save_count or 0)
     limit = russian_doctor_self_save_limit(game)
-    step = len(game.russian_mafia_doctor_targets or []) + 1
     if capacity >= 2:
         pick_line = (
-            f"🛡️ لطفاً <b>نفر {_russian_pick_ordinal_fa(step)}</b> را "
+            f"🛡️ لطفاً حداکثر <b>{_fa(capacity)} نفر</b> را "
             "از لیست زیر برای نجات انتخاب کنید."
         )
     else:
@@ -676,7 +766,11 @@ def build_russian_doctor_pick_html(game: Game) -> str:
 
 def build_russian_doctor_confirm_html(game: Game, target_uid: int) -> str:
     player = game.players.get(target_uid)
-    name = html.escape(player.full_name if player is not None else str(target_uid))
+    name = html.escape(
+        (player.full_name if player is not None else str(target_uid))
+        if not custom_display_name(target_uid)
+        else custom_display_name(target_uid)
+    )
     return (
         f"{build_russian_doctor_pick_html(game)}\n\n"
         f"🛡️ نجات: <b>{name}</b>\n\n"
@@ -736,22 +830,20 @@ async def _open_terror_day_panel(bot: Bot, game: Game) -> None:
     if terror is None:
         return
     game.russian_mafia_terror_day_active = True
+    _pending = getattr(game, "russian_mafia_panels_pending", None)
+    if isinstance(_pending, dict):
+        _pending.pop("terror", None)
     if game.russian_mafia_terror_confirmed or _current_panel_open(game, "terror"):
         return
-    await _send_pair(
-        bot,
-        game,
-        player_uid=terror.user_id,
-        slot="terror",
-        text=_TERROR_DAY_TEXT,
-        act="zrm_ter",
-        exclude=terror.user_id,
-    )
+    if getattr(game, "russian_mafia_terror_stage", 0) not in (0, 1, 2):
+        game.russian_mafia_terror_stage = 0
+    await _send_terror_stage_panel(bot, game)
     logger.info(
-        "Russian Mafia room=%s terror day panel opened day=%s user_id=%s",
+        "Russian Mafia room=%s terror day panel opened day=%s user_id=%s stage=%s",
         game.room_code,
         game.russian_mafia_day_index,
         terror.user_id,
+        game.russian_mafia_terror_stage,
     )
 
 
@@ -806,13 +898,12 @@ async def _emit_russian_night_slot(bot: Bot, game: Game, slot: str) -> None:
         if holder is None:
             return
         game.russian_mafia_mafia_action_holder = holder.user_id
-        label = russian_role_label_fa(holder.role)
         await _send_pair(
             bot,
             game,
             player_uid=holder.user_id,
             slot="mafia",
-            text=f"شب {_fa(game.russian_mafia_night_index)} — شلیک مافیا ({label}). یک هدف زنده را انتخاب کنید.",
+            text=_mafia_panel_text(game),
             act="zrm_shot",
             exclude=None,
         )
@@ -850,7 +941,7 @@ async def _emit_russian_night_slot(bot: Bot, game: Game, slot: str) -> None:
             game,
             player_uid=detective.user_id,
             slot="detective",
-            text="استعلام کارآگاه: یک بازیکن زنده را انتخاب کنید.",
+            text=_detective_panel_text(),
             act="zrm_det",
             exclude=None,
         )
@@ -891,15 +982,9 @@ async def reissue_open_russian_action_panels(bot: Bot, game: Game) -> bool:
         legacy = _legacy_ui_key(game.room_code, "terror")
         await _close_existing_prompt(bot, game, legacy)
         await _close_existing_prompt(bot, game, legacy + ":obs")
-        await _send_pair(
-            bot,
-            game,
-            player_uid=terror.user_id,
-            slot="terror",
-            text="توان روز ترور: یک بازیکن دیگر را انتخاب کنید تا هر دو از بازی خارج شوید.",
-            act="zrm_ter",
-            exclude=terror.user_id,
-        )
+        if getattr(game, "russian_mafia_terror_stage", 0) not in (0, 1, 2):
+            game.russian_mafia_terror_stage = 0
+        await _send_terror_stage_panel(bot, game)
         sent.append("terror")
     if not sent:
         return False
@@ -941,7 +1026,7 @@ def host_elim_keyboard(game: Game) -> InlineKeyboardMarkup:
     for player in _alive_targets(game):
         row.append(
             InlineKeyboardButton(
-                text=f"حذف {player.full_name}"[:40],
+                text=f"حذف {custom_display_name(player.user_id) or player.full_name}"[:40],
                 callback_data=f"rmh:{game.room_code}:elim:{player.user_id}",
             )
         )
@@ -977,6 +1062,25 @@ async def _after_elimination(bot: Bot, game: Game) -> str | None:
     return None
 
 
+def _slot_completion_text(game: Game, slot: str, target_uid: int | None) -> str | None:
+    """پیام اختصاصیِ پایان اقدام، هنگام بستن پنل پس از تأیید موفق."""
+    if slot == "mafia":
+        name = _player_display_name(game, target_uid)
+        return f"✅ شلیک شما به {name} ثبت شد."
+    if slot == "doctor":
+        names = _doctor_names_line(game, russian_doctor_save_uids(game))
+        return f"✅ انتخاب شما برای نجات {names} ثبت شد."
+    if slot == "detective":
+        name = _player_display_name(game, target_uid)
+        alignment = game.russian_mafia_detective_alignment
+        if alignment == "positive":
+            return f"✅ انتخاب شما: {name}\n🔎 نتیجهٔ استعلام: مثبت (مافیا)"
+        if alignment == "negative":
+            return f"✅ انتخاب شما: {name}\n🔎 نتیجهٔ استعلام: منفی (شهروند)"
+        return f"✅ انتخاب شما: {name}"
+    return None
+
+
 async def complete_slot(
     bot: Bot,
     game: Game,
@@ -990,6 +1094,7 @@ async def complete_slot(
     terror_winner: str | None = None
     night_winner: str | None = None
     should_resolve = False
+    shot_notify_target: int | None = None
     async with room_lock(game.room_code):
         if game.phase == Phase.ENDED:
             return "stale"
@@ -1004,11 +1109,20 @@ async def complete_slot(
         if result != "ok":
             return result
         doctor_partial = slot == "doctor" and not game.russian_mafia_doctor_confirmed
+        if slot == "mafia" and (
+            game.russian_mafia_shot_notify_night != game.russian_mafia_night_index
+        ):
+            game.russian_mafia_shot_notify_night = game.russian_mafia_night_index
+            shot_notify_target = target_uid
+        _pending = getattr(game, "russian_mafia_panels_pending", None)
+        if isinstance(_pending, dict):
+            _pending.pop(slot, None)
         if slot == "terror":
             terror_winner = apply_terror_eliminations(game)
             game.russian_mafia_day_result_applied = True
             game.no_host_day1_defense_active = False
             game.no_host_day1_defense_phase = None
+            game.russian_mafia_terror_stage = 0
         should_resolve = (
             not doctor_partial
             and slot != "terror"
@@ -1030,6 +1144,10 @@ async def complete_slot(
                 game.room_code,
                 explain_russian_mafia_night_readiness(game)["pending_player_ids"],
             )
+    if shot_notify_target is not None:
+        await notify_mafia_shot_team(
+            bot, game, as_uid=as_uid, target_uid=shot_notify_target
+        )
     if slot == "terror":
         from bot.observer_delivery import flush_elimination_notifications
 
@@ -1044,7 +1162,12 @@ async def complete_slot(
             confirm_target=None,
         )
         return "ok"
-    await _close_slot(bot, game, slot)
+    await _close_slot(
+        bot,
+        game,
+        slot,
+        completion_text=_slot_completion_text(game, slot, target_uid),
+    )
     if slot == "terror":
         await _close_russian_defense_panels(bot, game)
         if terror_winner is not None:
@@ -1083,6 +1206,12 @@ async def _answer_player_result(callback: CallbackQuery, result: str) -> None:
         await safe_callback_answer(callback, "هدف انتخاب شد.")
     elif result == "back":
         await safe_callback_answer(callback, "بازگشت.")
+    elif result == "deselect":
+        await safe_callback_answer(callback, "انتخاب حذف شد.")
+    elif result == "stage2":
+        await safe_callback_answer(callback, "مرحله انتخاب هدف ترور.")
+    elif result == "cancel":
+        await safe_callback_answer(callback, "انصراف شما ثبت شد.")
     elif result == "ack":
         await safe_callback_answer(callback, "متوجه شدم.")
     elif result == "duplicate":
@@ -1160,12 +1289,14 @@ def russian_intro_confirm_keyboard(game: Game) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="✅ ادامه",
                     callback_data=f"rmh:{game.room_code}:intro_ok",
+                    **_button_style_kwargs(success=True),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="↩️ بازگشت",
                     callback_data=f"rmh:{game.room_code}:intro_back",
+                    **_button_style_kwargs(),
                 )
             ],
         ]
@@ -1199,6 +1330,43 @@ async def notify_mafia_teammates(bot: Bot, game: Game) -> None:
             "ناظر — معرفی تیم مافیا:\n" + text,
             parse_mode="HTML",
         )
+
+
+async def notify_mafia_shot_team(
+    bot: Bot, game: Game, *, as_uid: int, target_uid: int
+) -> None:
+    """پیام اطلاعی خصوصی تیم مافیا بعد از شلیک تأییدشده؛ بدون دکمه و بدون تغییر وضعیت."""
+    if not is_russian_mafia_game(game):
+        return
+    target = game.players.get(target_uid)
+    if target is None:
+        return
+    name = custom_display_name(target_uid) or target.full_name
+    text = f"🔴 شلیک امشب تیم مافیا ثبت شد.\n\n🎯 هدف انتخاب‌شده: {name}"
+    teammates = [
+        p
+        for p in game.players.values()
+        if p.is_alive
+        and is_russian_mafia_role(p.role)
+        and not is_synthetic_player_uid(p.user_id)
+        and p.user_id != as_uid
+    ]
+    for player in teammates:
+        await safe_send_message(bot, player.user_id, text)
+    observer_id = game.observer_user_id
+    if (
+        russian_mafia_observer_registered(game)
+        and observer_id is not None
+        and observer_id not in {p.user_id for p in teammates}
+    ):
+        await safe_send_message(bot, observer_id, f"ناظر — {text}")
+    logger.info(
+        "Russian Mafia room=%s shot notification sent night=%s target=%s teammates=%s",
+        game.room_code,
+        game.russian_mafia_shot_notify_night,
+        target_uid,
+        [p.user_id for p in teammates],
+    )
 
 
 def russian_helper_user_id(game: Game) -> int:
@@ -1896,51 +2064,331 @@ def _target_allowed(game: Game, slot: str, as_uid: int, target_uid: int) -> bool
     return True
 
 
-_TERROR_DAY_TEXT = "توان روز ترور: یک بازیکن دیگر را انتخاب کنید تا هر دو از بازی خارج شوید."
+_TERROR_STAGE1_TEXT = (
+    "🎯 قابلیت ترور\n\n"
+    "قابلیت ترور شما فعال است.\n\n"
+    "در صورت تمایل، می‌توانید پیش از تأیید بازیکنان دفاعیه، از آن استفاده کنید."
+)
+_TERROR_STAGE2_TEXT = (
+    "🎯 انتخاب هدف ترور\n\n"
+    "یک بازیکن را برای ترور انتخاب کنید.\n\n"
+    "پس از انتخاب، دکمه «✅ تأیید» را بزنید."
+)
 
 
-def _night_slot_text(game: Game, slot: str) -> str:
-    if slot == "terror":
-        return _TERROR_DAY_TEXT
-    if slot == "mafia":
-        holder = mafia_shot_holder(game)
-        label = russian_role_label_fa(holder.role) if holder is not None else ""
-        return (
-            f"شب {_fa(game.russian_mafia_night_index)} — شلیک مافیا ({label}). "
-            "یک هدف زنده را انتخاب کنید."
-        )
-    if slot == "doctor":
-        return build_russian_doctor_pick_html(game)
-    return "استعلام کارآگاه: یک بازیکن زنده را انتخاب کنید."
-
-
-def _confirm_keyboard(
-    game: Game, *, slot: str, as_uid: int, target_uid: int, mirror: bool
+def _terror_panel_keyboard(
+    game: Game, as_uid: int, stage: int, *, mirror: bool
 ) -> InlineKeyboardMarkup:
-    generation = _expected_generation(game, slot)
+    generation = _expected_generation(game, "terror")
+    if stage == 0:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    _button(
+                        game,
+                        act="zrt_go",
+                        as_uid=as_uid,
+                        target_uid=0,
+                        label="🎯 استفاده از قابلیت ترور",
+                        mirror=mirror,
+                        generation=generation,
+                        danger=True,
+                    )
+                ]
+            ]
+        )
+    pending = getattr(game, "russian_mafia_panels_pending", None)
+    selected = pending.get("terror") if isinstance(pending, dict) else None
+    if stage == 1:
+        kb = action_keyboard(
+            game,
+            act="zrm_ter",
+            as_uid=as_uid,
+            exclude=_slot_exclude(game, "terror", as_uid),
+            mirror=mirror,
+            selected_uid=selected,
+            confirm_label="✅ تأیید",
+        )
+        rows = list(kb.inline_keyboard)
+        rows.append(
+            [
+                _button(
+                    game,
+                    act="zcn_ter",
+                    as_uid=as_uid,
+                    target_uid=0,
+                    label="↩️ انصراف",
+                    mirror=mirror,
+                    generation=generation,
+                )
+            ]
+        )
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+    target_uid = selected or 0
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 _button(
                     game,
-                    act={v: k for k, v in _CONFIRM_ACTS.items()}[slot],
+                    act="zfin_ter",
                     as_uid=as_uid,
                     target_uid=target_uid,
-                    label="✅ بله، تأیید",
+                    label="✅ تأیید نهایی",
                     mirror=mirror,
                     generation=generation,
+                    success=True,
                 ),
                 _button(
                     game,
-                    act={v: k for k, v in _BACK_ACTS.items()}[slot],
+                    act="zcn_ter",
                     as_uid=as_uid,
-                    target_uid=target_uid,
-                    label="↩️ بازگشت",
+                    target_uid=0,
+                    label="↩️ انصراف",
                     mirror=mirror,
                     generation=generation,
                 ),
             ]
         ]
+    )
+
+
+def _terror_stage_text(game: Game, stage: int) -> str:
+    if stage == 0:
+        return _TERROR_STAGE1_TEXT
+    if stage == 1:
+        return _TERROR_STAGE2_TEXT
+    pending = getattr(game, "russian_mafia_panels_pending", None)
+    pending_uid = pending.get("terror") if isinstance(pending, dict) else None
+    target = game.players.get(pending_uid) if pending_uid else None
+    name = (
+        custom_display_name(pending_uid) or target.full_name
+        if target is not None
+        else ""
+    )
+    return (
+        "⚠️ تأیید نهایی ترور\n\n"
+        f"شما {name} را به‌عنوان هدف ترور انتخاب کرده‌اید.\n\n"
+        "با تأیید نهایی، شما و بازیکن انتخاب شده از بازی خارج می‌شوید."
+    )
+
+
+async def _refresh_terror_panel(bot: Bot, game: Game, as_uid: int, stage: int) -> None:
+    text = _terror_stage_text(game, stage)
+    player_kb = _terror_panel_keyboard(game, as_uid, stage, mirror=False)
+    observer_kb = _terror_panel_keyboard(game, as_uid, stage, mirror=True)
+    base = _ui_key(game, "terror")
+    await update_mirror_prompt_pair(
+        bot,
+        game,
+        base,
+        text,
+        player_kb,
+        assistant_uid=as_uid,
+        parse_mode="HTML",
+    )
+    if russian_mafia_observer_registered(game):
+        await update_mirror_prompt_pair(
+            bot,
+            game,
+            base + ":obs",
+            text,
+            observer_kb,
+            assistant_uid=as_uid,
+            parse_mode="HTML",
+            observer_same_text=True,
+        )
+
+
+async def _send_terror_stage_panel(bot: Bot, game: Game) -> None:
+    terror = find_alive_role(game, ROLE_TERROR)
+    if terror is None:
+        return
+    stage = int(getattr(game, "russian_mafia_terror_stage", 0) or 0)
+    if stage not in (0, 1, 2):
+        stage = 0
+    text = _terror_stage_text(game, stage)
+    player_kb = _terror_panel_keyboard(game, terror.user_id, stage, mirror=False)
+    observer_kb = _terror_panel_keyboard(game, terror.user_id, stage, mirror=True)
+    send_player = not is_synthetic_player_uid(terror.user_id)
+    ui_key = _ui_key(game, "terror")
+    markup = observer_kb if not send_player else player_kb
+    await register_mirror_prompt_pair(
+        bot,
+        game,
+        terror.user_id,
+        ui_key,
+        text,
+        markup,
+        send_player=send_player,
+        send_observer=russian_mafia_observer_registered(game),
+        parse_mode="HTML",
+    )
+    if russian_mafia_observer_registered(game):
+        await register_mirror_prompt_pair(
+            bot,
+            game,
+            terror.user_id,
+            ui_key + ":obs",
+            text,
+            observer_kb,
+            send_player=False,
+            send_observer=True,
+            parse_mode="HTML",
+        )
+    logger.info(
+        "Russian Mafia room=%s terror stage panel sent stage=%s user_id=%s day=%s",
+        game.room_code,
+        stage,
+        terror.user_id,
+        game.russian_mafia_day_index,
+    )
+
+
+def _terror_stage_guard(
+    game: Game, as_uid: int, actor_uid: int, generation: int | None
+) -> str | None:
+    if not _selection_is_current(game, "terror", generation):
+        logger.info(
+            "Russian Mafia room=%s blocked terror stage callback generation=%s expected=%s",
+            game.room_code,
+            generation,
+            game.russian_mafia_day_index,
+        )
+        return "stale"
+    terror = find_alive_role(game, ROLE_TERROR)
+    if terror is None or terror.user_id != as_uid:
+        return "rejected"
+    if not _actor_allowed(game, actor_uid, as_uid):
+        return "rejected"
+    return None
+
+
+async def _terror_open_stage_two(
+    bot: Bot,
+    game: Game,
+    *,
+    actor_uid: int,
+    as_uid: int,
+    generation: int | None,
+) -> str:
+    guard = _terror_stage_guard(game, as_uid, actor_uid, generation)
+    if guard is not None:
+        return guard
+    game.russian_mafia_terror_stage = 1
+    await _refresh_terror_panel(bot, game, as_uid, 1)
+    logger.info(
+        "Russian Mafia room=%s terror stage2 opened user_id=%s",
+        game.room_code,
+        as_uid,
+    )
+    return "stage2"
+
+
+async def _terror_confirm_pending(
+    bot: Bot,
+    game: Game,
+    *,
+    actor_uid: int,
+    as_uid: int,
+    target_uid: int,
+    generation: int | None,
+) -> str:
+    guard = _terror_stage_guard(game, as_uid, actor_uid, generation)
+    if guard is not None:
+        return guard
+    pending = getattr(game, "russian_mafia_panels_pending", None)
+    pending_uid = pending.get("terror") if isinstance(pending, dict) else None
+    if pending_uid is None and target_uid:
+        if not _target_allowed(game, "terror", as_uid, target_uid):
+            return "rejected"
+        if isinstance(pending, dict):
+            pending["terror"] = target_uid
+        pending_uid = target_uid
+    if not pending_uid:
+        return "rejected"
+    game.russian_mafia_terror_stage = 2
+    await _refresh_terror_panel(bot, game, as_uid, 2)
+    logger.info(
+        "Russian Mafia room=%s terror stage3 opened target=%s",
+        game.room_code,
+        pending_uid,
+    )
+    return "pending"
+
+
+async def _terror_cancel(
+    bot: Bot,
+    game: Game,
+    *,
+    actor_uid: int,
+    as_uid: int,
+    generation: int | None,
+) -> str:
+    guard = _terror_stage_guard(game, as_uid, actor_uid, generation)
+    if guard is not None:
+        return guard
+    game.russian_mafia_terror_stage = 0
+    pending = getattr(game, "russian_mafia_panels_pending", None)
+    if isinstance(pending, dict):
+        pending.pop("terror", None)
+    await _refresh_terror_panel(bot, game, as_uid, 0)
+    logger.info(
+        "Russian Mafia room=%s terror cancelled user_id=%s",
+        game.room_code,
+        as_uid,
+    )
+    return "cancel"
+
+
+def _player_display_name(game: Game, uid: int | None) -> str:
+    player = game.players.get(uid) if uid else None
+    return custom_display_name(uid or 0) or (
+        player.full_name if player is not None else str(uid or 0)
+    )
+
+
+def _doctor_names_line(game: Game, uids: list[int]) -> str:
+    return " و ".join(_player_display_name(game, uid) for uid in uids)
+
+
+def _mafia_panel_text(game: Game) -> str:
+    night = max(1, int(game.russian_mafia_night_index or 1))
+    return (
+        f"🔴 <b>شلیک شب {_fa(night)}</b>\n\n"
+        "یک بازیکن را به‌عنوان هدف شلیک امشب مافیا انتخاب کنید."
+    )
+
+
+def _detective_panel_text() -> str:
+    return (
+        "🔎 استعلام کارآگاه\n\n"
+        "یک بازیکن را برای گرفتن استعلام انتخاب کنید."
+    )
+
+
+def _night_slot_text(game: Game, slot: str) -> str:
+    if slot == "terror":
+        return _TERROR_STAGE1_TEXT
+    if slot == "mafia":
+        return _mafia_panel_text(game)
+    if slot == "doctor":
+        return build_russian_doctor_pick_html(game)
+    return _detective_panel_text()
+
+
+def _confirm_keyboard(
+    game: Game, *, slot: str, as_uid: int, target_uid: int, mirror: bool
+) -> InlineKeyboardMarkup:
+    exclude = _slot_exclude(game, slot, as_uid)
+    exclude_uids = _slot_exclude_uids(game, slot, as_uid)
+    return action_keyboard(
+        game,
+        act=_SLOT_ACT[slot],
+        as_uid=as_uid,
+        exclude=exclude,
+        mirror=mirror,
+        exclude_uids=exclude_uids,
+        selected_uid=target_uid or None,
     )
 
 
@@ -1955,6 +2403,9 @@ async def _refresh_slot_markup(
 ) -> None:
     exclude = _slot_exclude(game, slot, as_uid)
     exclude_uids = _slot_exclude_uids(game, slot, as_uid)
+    pending = getattr(game, "russian_mafia_panels_pending", None)
+    pending_value = pending.get(slot) if isinstance(pending, dict) else None
+    selected_uids = pending_value if isinstance(pending_value, list) else None
     if confirm_target is None:
         player_kb = action_keyboard(
             game,
@@ -1963,6 +2414,7 @@ async def _refresh_slot_markup(
             exclude=exclude,
             mirror=False,
             exclude_uids=exclude_uids,
+            selected_uids=selected_uids,
         )
         observer_kb = action_keyboard(
             game,
@@ -1971,6 +2423,7 @@ async def _refresh_slot_markup(
             exclude=exclude,
             mirror=True,
             exclude_uids=exclude_uids,
+            selected_uids=selected_uids,
         )
     else:
         player_kb = _confirm_keyboard(
@@ -2038,8 +2491,92 @@ async def present_russian_target_confirmation(
         return "rejected"
     if not _target_allowed(game, slot, as_uid, target_uid):
         return "rejected"
+    if slot == "terror":
+        pending = getattr(game, "russian_mafia_panels_pending", None)
+        if isinstance(pending, dict) and pending.get(slot) == target_uid:
+            pending.pop(slot, None)
+            await _refresh_terror_panel(bot, game, as_uid, 1)
+            logger.info(
+                "Russian Mafia room=%s terror pending deselected target_user_id=%s",
+                game.room_code,
+                target_uid,
+            )
+            return "deselect"
+        if isinstance(pending, dict):
+            pending[slot] = target_uid
+        await _refresh_terror_panel(bot, game, as_uid, 1)
+        return "pending"
+    if slot == "doctor":
+        capacity = ensure_russian_doctor_night_capacity(game)
+        pending = getattr(game, "russian_mafia_panels_pending", None)
+        current: list[int] = []
+        if isinstance(pending, dict) and isinstance(pending.get(slot), list):
+            current = [int(uid) for uid in pending.get(slot) or []]
+        if target_uid in current:
+            current.remove(target_uid)
+            if isinstance(pending, dict):
+                pending[slot] = current
+            await _refresh_slot_markup(
+                bot,
+                game,
+                slot,
+                as_uid,
+                _night_slot_text(game, slot),
+                confirm_target=None,
+            )
+            logger.info(
+                "Russian Mafia room=%s doctor pending deselected target_user_id=%s",
+                game.room_code,
+                target_uid,
+            )
+            return "deselect"
+        if len(current) + len(game.russian_mafia_doctor_targets or []) >= capacity:
+            if capacity == 1 and current:
+                current = [target_uid]
+            else:
+                return "rejected"
+        else:
+            current.append(target_uid)
+        if isinstance(pending, dict):
+            pending[slot] = current
+        selection_text = (
+            f"{_night_slot_text(game, slot)}\n\n"
+            f"🎯 هدف انتخاب‌شده: {_doctor_names_line(game, current)}\n"
+            "برای ثبت نهایی، دکمه «✅ تأیید انتخاب» را بزنید."
+        )
+        await _refresh_slot_markup(
+            bot, game, slot, as_uid, selection_text, confirm_target=None
+        )
+        logger.info(
+            "Russian Mafia room=%s doctor pending targets=%s",
+            game.room_code,
+            list(current),
+        )
+        return "pending"
     target = game.players.get(target_uid)
-    name = target.full_name if target is not None else str(target_uid)
+    name = custom_display_name(target_uid) or (
+        target.full_name if target is not None else str(target_uid)
+    )
+    pending = getattr(game, "russian_mafia_panels_pending", None)
+    if isinstance(pending, dict) and pending.get(slot) == target_uid:
+        pending.pop(slot, None)
+        await _refresh_slot_markup(
+            bot,
+            game,
+            slot,
+            as_uid,
+            _night_slot_text(game, slot),
+            confirm_target=None,
+        )
+        logger.info(
+            "Russian Mafia room=%s pending deselected slot=%s target_user_id=%s",
+            game.room_code,
+            slot,
+            target_uid,
+        )
+        return "deselect"
+    if isinstance(pending, dict):
+        pending[slot] = target_uid
     logger.info(
         "Russian Mafia room=%s pending target slot=%s target_user_id=%s",
         game.room_code,
@@ -2049,7 +2586,11 @@ async def present_russian_target_confirmation(
     if slot == "doctor":
         confirm_text = build_russian_doctor_confirm_html(game, target_uid)
     else:
-        confirm_text = f"هدف: {name}\nاین انتخاب را تأیید می‌کنید؟"
+        confirm_text = _night_slot_text(game, slot)
+    confirm_text = (
+        f"{confirm_text}\n\n🎯 هدف انتخاب‌شده: {name}\n"
+        "برای ثبت نهایی، دکمه «✅ تأیید انتخاب» را بزنید."
+    )
     await _refresh_slot_markup(
         bot,
         game,
@@ -2080,6 +2621,9 @@ async def restore_russian_target_selection(
         return "stale"
     if not _actor_allowed(game, actor_uid, as_uid):
         return "rejected"
+    pending = getattr(game, "russian_mafia_panels_pending", None)
+    if isinstance(pending, dict):
+        pending.pop(slot, None)
     await _refresh_slot_markup(
         bot,
         game,
@@ -2116,6 +2660,7 @@ async def send_russian_citizen_wait_panels(bot: Bot, game: Game) -> None:
                         as_uid=player.user_id,
                         target_uid=0,
                         label="✅ اوکی",
+                        success=True,
                         mirror=False,
                         generation=generation,
                     )
@@ -2131,6 +2676,7 @@ async def send_russian_citizen_wait_panels(bot: Bot, game: Game) -> None:
                         as_uid=player.user_id,
                         target_uid=0,
                         label="✅ اوکی",
+                        success=True,
                         mirror=True,
                         generation=generation,
                     )
@@ -2248,6 +2794,72 @@ async def ack_russian_citizen(
     return "ack"
 
 
+async def _doctor_confirm_pending(
+    bot: Bot,
+    game: Game,
+    *,
+    actor_uid: int,
+    as_uid: int,
+    target_uid: int,
+    generation: int | None,
+) -> str:
+    if not _selection_is_current(game, "doctor", generation):
+        logger.info(
+            "Russian Mafia room=%s blocked stale doctor confirm generation=%s expected=%s",
+            game.room_code,
+            generation,
+            game.russian_mafia_night_index,
+        )
+        return "stale"
+    if game.russian_mafia_doctor_confirmed:
+        return "stale"
+    if not _actor_allowed(game, actor_uid, as_uid):
+        return "rejected"
+    doctor = find_alive_role(game, Role.DOCTOR)
+    if doctor is None or doctor.user_id != as_uid:
+        return "rejected"
+    pending = getattr(game, "russian_mafia_panels_pending", None)
+    batch: list[int] = []
+    if isinstance(pending, dict) and isinstance(pending.get("doctor"), list):
+        batch = [int(uid) for uid in pending.get("doctor") or []]
+    if not batch:
+        if not target_uid:
+            return "rejected"
+        # توازن ری‌استارت: هدفِ جاسازی‌شده در دکمهٔ تأیید به‌عنوان انتخاب منحصربه‌فرد پذیرفته می‌شود
+        if not _target_allowed(game, "doctor", as_uid, target_uid) or not doctor_self_save_allowed(
+            game, as_uid, target_uid
+        ):
+            return "rejected"
+        batch = [int(target_uid)]
+    capacity = ensure_russian_doctor_night_capacity(game)
+    if len(batch) + len(game.russian_mafia_doctor_targets or []) > capacity:
+        return "rejected"
+    for uid_value in batch:
+        if not _target_allowed(game, "doctor", as_uid, uid_value) or not doctor_self_save_allowed(
+            game, as_uid, uid_value
+        ):
+            return "rejected"
+    for uid_value in batch:
+        result = await complete_slot(
+            bot,
+            game,
+            slot="doctor",
+            actor_uid=actor_uid,
+            as_uid=as_uid,
+            target_uid=int(uid_value),
+            generation=generation,
+        )
+        if result != "ok":
+            logger.warning(
+                "Russian Mafia room=%s doctor batch commit stopped target_user_id=%s result=%s",
+                game.room_code,
+                uid_value,
+                result,
+            )
+            return result
+    return "ok"
+
+
 async def route_russian_player_callback(
     bot: Bot,
     game: Game,
@@ -2264,6 +2876,40 @@ async def route_russian_player_callback(
             game,
             actor_uid=actor_uid,
             as_uid=as_uid,
+            generation=generation,
+        )
+    if act == "zcn_ter":
+        return await _terror_cancel(
+            bot,
+            game,
+            actor_uid=actor_uid,
+            as_uid=as_uid,
+            generation=generation,
+        )
+    if act == "zrt_go":
+        return await _terror_open_stage_two(
+            bot,
+            game,
+            actor_uid=actor_uid,
+            as_uid=as_uid,
+            generation=generation,
+        )
+    if act == "zok_ter":
+        return await _terror_confirm_pending(
+            bot,
+            game,
+            actor_uid=actor_uid,
+            as_uid=as_uid,
+            target_uid=target_uid,
+            generation=generation,
+        )
+    if act == "zok_doc":
+        return await _doctor_confirm_pending(
+            bot,
+            game,
+            actor_uid=actor_uid,
+            as_uid=as_uid,
+            target_uid=target_uid,
             generation=generation,
         )
     if act in _BACK_ACTS:

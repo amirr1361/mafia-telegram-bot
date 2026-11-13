@@ -33,6 +33,11 @@ from bot.no_host_mafia_night1 import (
     notify_all_alive_mafia_team,
     sync_mafia_mirror_panel,
 )
+from bot.no_host_role_pick_common import (
+    append_pending_selection_line,
+    apply_bazpors_panel_styles,
+    with_inline_confirm_row,
+)
 from bot.game import is_synthetic_player_uid
 from bot.observer_delivery import (
     PlayerMirrorCb,
@@ -139,40 +144,48 @@ def build_no_host_yaku_mafia_wait_html(success: bool, civ_tag: str) -> str:
 
 
 def _yaku_denied_keyboard(game: Game, mafia_uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="↩️ بازگشت به مرحله قبل",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="nmb", as_uid=mafia_uid
-                    ).pack(),
-                )
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="↩️ بازگشت به مرحله قبل",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act="nmb", as_uid=mafia_uid
+                        ).pack(),
+                    )
+                ]
             ]
-        ]
+        ),
+        ok_acts={"nmb"},
     )
 
 
 def _confirm_keyboard(game: Game, mafia_uid: int, confirm_act: str, back_act: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔹 بله، تأیید انتخاب",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act=confirm_act, as_uid=mafia_uid
-                    ).pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔹 بازگشت و تصحیح انتخاب",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act=back_act, as_uid=mafia_uid
-                    ).pack(),
-                )
-            ],
-        ]
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔹 بله، تأیید انتخاب",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act=confirm_act, as_uid=mafia_uid
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🔹 بازگشت و تصحیح انتخاب",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act=back_act, as_uid=mafia_uid
+                        ).pack(),
+                    )
+                ],
+            ]
+        ),
+        ok_acts={confirm_act, back_act},
     )
 
 
@@ -199,7 +212,43 @@ def _pick_keyboard(
             row = []
     if row:
         rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    selected = [
+        uid
+        for uid in (
+            game.no_host_mafia_yaku_pending_sac_uid,
+            game.no_host_mafia_yaku_pending_civ_uid,
+        )
+        if uid is not None
+    ]
+    kb = apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(inline_keyboard=rows),
+        pick_acts={pick_act},
+        selected_uids=selected,
+    )
+    if game.scenario_name == "bazpors":
+        # بازپرس — تأیید سبز در هر مرحله (فدا/هدف) از رندر اولیه.
+        confirm_act = "ysc" if pick_act == "ysp" else "ycc"
+        kb = with_inline_confirm_row(game, mafia_uid, kb, confirm_act=confirm_act)
+    return kb
+
+
+def _yaku_sac_pending_line(game: Game, gm: "GameManager") -> str:
+    tid = game.no_host_mafia_yaku_pending_sac_uid
+    if tid is not None:
+        p = game.players.get(tid)
+        tag = html.escape(gm.format_player_tag(p) if p else str(tid))
+        return f"🩸 فدای فعلی: <b>{tag}</b>"
+    return "🩸 فدای فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
+
+
+def _yaku_civ_pending_line(game: Game, gm: "GameManager") -> str:
+    tid = game.no_host_mafia_yaku_pending_civ_uid
+    if tid is not None:
+        p = game.players.get(tid)
+        tag = html.escape(gm.format_player_tag(p) if p else str(tid))
+        return f"🎯 هدف فعلی: <b>{tag}</b>"
+    return "🎯 هدف فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
 
 
 def _format_alive_mafia_team_html(
@@ -515,6 +564,23 @@ async def dispatch_no_host_mafia_yaku(
         if tid not in allowed:
             await callback.answer("این بازیکن نمی‌تواند فدا شود.", show_alert=True)
             return
+        if game.scenario_name == "bazpors":
+            if yaku.no_host_pending_sac_uid == tid:
+                # زدن دوباره روی فدای فعلی = لغو انتخاب.
+                yaku.no_host_pending_sac_uid = None
+                await callback.answer("انتخاب لغو شد.")
+            else:
+                yaku.no_host_pending_sac_uid = tid
+                await callback.answer("انتخاب شد؛ تأیید کنید.")
+            # بازپرس — پنل فدا با انتخاب قرمز + تأیید سبز در همان صفحه.
+            text = append_pending_selection_line(
+                build_no_host_yaku_sac_pick_html(),
+                [_yaku_sac_pending_line(game, gm)],
+            )
+            kb = _pick_keyboard(game, boss_uid, gm, _yaku_sacrifice_pool(game), "ysp")
+            await _edit_mafia_prompt(bot, game, boss_uid, text, kb)
+            await sync_mafia_mirror_panel(bot, game, boss_uid, text, kb)
+            return
         yaku.no_host_pending_sac_uid = tid
         await callback.answer("انتخاب شد؛ تأیید کنید.")
         confirm_text = build_no_host_yaku_sac_confirm_html(game, gm, tid)
@@ -550,6 +616,23 @@ async def dispatch_no_host_mafia_yaku(
         pool_ids = {p.user_id for p in _yaku_civilian_pool(game)}
         if tid not in pool_ids:
             await callback.answer("انتخاب نامعتبر.", show_alert=True)
+            return
+        if game.scenario_name == "bazpors":
+            if yaku.no_host_pending_civ_uid == tid:
+                # زدن دوباره روی هدف فعلی = لغو انتخاب.
+                yaku.no_host_pending_civ_uid = None
+                await callback.answer("انتخاب لغو شد.")
+            else:
+                yaku.no_host_pending_civ_uid = tid
+                await callback.answer("انتخاب شد؛ تأیید کنید.")
+            # بازپرس — پنل هدف با انتخاب قرمز + تأیید سبز در همان صفحه.
+            text = append_pending_selection_line(
+                build_no_host_yaku_civ_pick_html(),
+                [_yaku_civ_pending_line(game, gm)],
+            )
+            kb = _pick_keyboard(game, boss_uid, gm, _yaku_civilian_pool(game), "ycp")
+            await _edit_mafia_prompt(bot, game, boss_uid, text, kb)
+            await sync_mafia_mirror_panel(bot, game, boss_uid, text, kb)
             return
         yaku.no_host_pending_civ_uid = tid
         await callback.answer("انتخاب شد؛ تأیید کنید.")

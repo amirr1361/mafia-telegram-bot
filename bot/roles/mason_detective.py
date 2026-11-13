@@ -33,8 +33,10 @@ def mason_detective_investigation_pool(game: Game) -> list[Player]:
 
 
 def mason_detective_panel_button_names(game: Game) -> list[str]:
+    from bot.app_state import custom_display_name
+
     return [
-        p.full_name or str(p.user_id)
+        custom_display_name(p.user_id) or p.full_name or str(p.user_id)
         for p in mason_detective_investigation_pool(game)
     ]
 

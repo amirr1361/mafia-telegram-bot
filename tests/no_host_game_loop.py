@@ -340,6 +340,9 @@ async def complete_night_role_picks(harness: NoHostFlowHarness) -> None:
     hunter = find_alive_role_holder(g, Role.HUNTER)
     if hunter is not None and not g.no_host_night1_hunter_done:
         await dispatch_role_mirror(harness, "hns", hunter.user_id)
+        # بازپرس (Room 97): «به کسی وصل نمی‌شوم» انتخاب موقتی است — تأیید سبز لازم.
+        if g.no_host_hunter_pending_none:
+            await dispatch_role_mirror(harness, "hnc", hunter.user_id)
 
     from bot.no_host_mafia_night1 import resolve_mafia_night1_panel_recipients
 
@@ -385,6 +388,9 @@ async def complete_night_role_picks(harness: NoHostFlowHarness) -> None:
     if intr is not None and not g.no_host_interrog_pick_confirmed:
         if not g.bazpors_interrog_night_finished:
             await dispatch_role_mirror(harness, "nii1s", intr.user_id)
+            # طرح یکپارچهٔ بازپرس: انصراف فقط با دکمهٔ تأیید سبز ثبت می‌شود.
+            if not g.no_host_interrog_pick_confirmed:
+                await dispatch_role_mirror(harness, "niisk", intr.user_id)
 
     await _complete_shiad_pick(harness)
 
@@ -482,6 +488,32 @@ async def complete_interrog_day_tie(harness: NoHostFlowHarness) -> None:
         )
 
 
+async def run_default_day_elim(harness: NoHostFlowHarness) -> None:
+    """Day 2+: real defense/vote session; eliminate the first town member."""
+    from bot.game import bazpors_counts_as_mafia_faction
+
+    g = harness.game
+    town = [
+        uid
+        for uid, p in sorted(g.players.items())
+        if p.is_alive and not bazpors_counts_as_mafia_faction(g, p)
+    ]
+    candidates = town or [
+        uid for uid, p in sorted(g.players.items()) if p.is_alive
+    ]
+    if not candidates:
+        return
+    target = candidates[0]
+    from bot.bazpors_narrator import begin_no_host_day1_defense_pick
+
+    begin_no_host_day1_defense_pick(g)
+    await harness.dispatch_defense('tog', tid=target)
+    await harness.dispatch_defense('confirm')
+    await harness.dispatch_defense('d1el', tid=target)
+    await harness.dispatch_defense('elim_yes')
+    await harness.skip_handoff_if_offered()
+
+
 async def advance_one_phase(harness: NoHostFlowHarness) -> bool:
     if game_ended(harness):
         return False
@@ -503,12 +535,12 @@ async def advance_one_phase(harness: NoHostFlowHarness) -> bool:
         await complete_interrog_day_tie(harness)
         return True
 
-    if g.no_host_day1_defense_active:
+    if g.no_host_day1_defense_active and g.bazpors_narrator_host_day <= 1:
         await harness.day1_no_defense()
         return True
 
-    if step == DAY_DISCUSS and not g.no_host_day1_vote_resolved:
-        await skip_day_vote_to_night(harness)
+    if step == DAY_DISCUSS:
+        await run_default_day_elim(harness)
         return True
 
     if step == NIGHT_START or g.no_host_night_parallel_collect_active:

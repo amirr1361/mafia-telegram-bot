@@ -269,7 +269,7 @@ async def cb_create_players(
     elif callback_data.slug == "namayande":
         if callback_data.count not in NAMAYANDEH_PLAYER_COUNTS:
             await callback.answer(
-                "نماینده: ۱۰، ۱۱، ۱۲، ۱۳، ۱۴ یا ۱۶ بازیکن.",
+                "نماینده: ۱۰، ۱۱، ۱۲ یا ۱۳ بازیکن.",
                 show_alert=True,
             )
             return
@@ -277,15 +277,73 @@ async def cb_create_players(
         await callback.answer("انتخاب نامعتبر است.", show_alert=True)
         return
 
+    # نمایندهٔ no-host — پیاده‌سازی مستقل fork (۱۰ تا ۱۳ بازیکن).
+    nam10_fork = (
+        callback_data.slug == "namayande"
+        and callback_data.count in (10, 11, 12, 13)
+    )
     game = manager.create_game(
         host_id=uid,
         scenario_name=callback_data.slug,
         max_players=callback_data.count,
         host_full_name=callback.from_user.full_name or "",
         host_username=callback.from_user.username,
+        nam10_no_host=nam10_fork,
     )
     if not game:
         await callback.answer("امکان ساخت اتاق نیست.", show_alert=True)
+        return
+
+    if nam10_fork:
+        creator = Player(
+            user_id=uid,
+            full_name=(callback.from_user.full_name or "").strip() or "بازیکن",
+            username=callback.from_user.username,
+        )
+        join_err = manager.add_player(game, creator)
+        if join_err and join_err != "already_in_room":
+            if callback.message:
+                await callback.message.edit_text(
+                    "اتاق ساخته شد اما ثبت شما به‌عنوان بازیکن ناموفق بود. "
+                    f"کد: <code>{html.escape(game.room_code)}</code>",
+                    parse_mode="HTML",
+                )
+            return
+        # No-host fork: present the creation the same way Bazpors no-host does
+        # (player-host announcement + synthetic-lobby dev-fill keyboard) instead
+        # of falling through to the generic classic-host text.
+        await callback.answer()
+        if not callback.message:
+            return
+        bot_username = (await bot.get_me()).username or "YourBot"
+        invite_link = f"https://t.me/{bot_username}?start={game.room_code}"
+        label = manager.scenario_display_name(game.scenario_name)
+        roster_plain = role_roster_banner_text(
+            game.scenario_name,
+            game.max_players,
+            manager,
+            nam10_no_host=True,
+        )
+        roster_html = format_roster_plain_to_html(roster_plain)
+        host_label = manager.get_user_display_name(
+            uid,
+            (callback.from_user.full_name or "").strip() or "—",
+        )
+        text = build_host_mode_created_room_html(
+            game,
+            mode="no_host",
+            invite_link=invite_link,
+            host_label=host_label,
+            scenario_label=label,
+            roster_html=roster_html,
+            creator_registered=True,
+        )
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=semi_auto_lobby_dev_keyboard(game),
+        )
         return
 
     if game.scenario_name == "bazpors_salamat_test":
@@ -334,7 +392,12 @@ async def cb_create_players(
     bot_username = (await bot.get_me()).username or "YourBot"
     invite_link = f"https://t.me/{bot_username}?start={game.room_code}"
     label = manager.scenario_display_name(game.scenario_name)
-    roster_plain = role_roster_banner_text(game.scenario_name, game.max_players, manager)
+    roster_plain = role_roster_banner_text(
+        game.scenario_name,
+        game.max_players,
+        manager,
+        nam10_no_host=nam10_fork,
+    )
     roster_html = format_roster_plain_to_html(roster_plain)
     host_label = manager.get_user_display_name(
         uid,
@@ -620,7 +683,12 @@ async def cb_semi_auto_dev_lobby(
         return
 
     if is_no_host_player_room(game):
-        err_code = manager.fill_no_host_synthetic_lobby(game)
+        from bot.room_mode import is_namayande10_no_host_room
+
+        if is_namayande10_no_host_room(game):
+            err_code = manager.fill_namayande10_synthetic_lobby(game)
+        else:
+            err_code = manager.fill_no_host_synthetic_lobby(game)
     elif (
         game.scenario_name == "russian_mafia"
         and game.bazpors_host_mode == "host_helper"

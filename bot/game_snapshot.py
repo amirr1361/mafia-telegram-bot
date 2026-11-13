@@ -20,6 +20,10 @@ _TUPLE_VALUE_FIELDS = frozenset(
         "bazpors_assistant_panel_refs",
         "bazpors_observer_narrator_mirror_refs",
         "no_host_mafia_night1_refs",
+        # Namayande 10-player fork equivalents (bot/nam10, independent state)
+        "nmnd_assistant_panel_refs",
+        "nmnd_observer_narrator_mirror_refs",
+        "nam10_mafia_night1_refs",
         "russian_mafia_role_pick_panel_messages",
     }
 )

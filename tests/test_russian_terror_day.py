@@ -79,7 +79,7 @@ class _Sent:
 
 
 def _terror_rows(sent: _Sent):
-    return [row for row in sent.rows if "توان روز ترور" in row[1]]
+    return [row for row in sent.rows if "قابلیت ترور" in row[1]]
 
 
 class TerrorDayPanelTests(unittest.TestCase):
@@ -116,9 +116,26 @@ class TerrorDayPanelTests(unittest.TestCase):
         observer_rows = [row for row in _terror_rows(sent) if row[0] == 900]
         self.assertEqual(len(player_rows), 1)
         self.assertEqual(len(observer_rows), 1)
-        targets = _targets(player_rows[0][2])
-        self.assertNotIn(terror, targets)
-        self.assertIn(_alive(game, Role.CITIZEN), targets)
+        buttons = [
+            button
+            for row in player_rows[0][2].inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(
+            [button.text for button in buttons], ["🎯 استفاده از قابلیت ترور"]
+        )
+        data = buttons[0].callback_data
+        if data.startswith("pmr:"):
+            mirror = PlayerMirrorCb.unpack(data)
+            self.assertEqual(mirror.act, "zrt_go")
+            self.assertEqual(mirror.as_uid, terror)
+            self.assertEqual(mirror.tid, 0)
+        else:
+            parts = data.split(":")
+            self.assertEqual(parts[0], "rmf")
+            self.assertEqual(parts[2], "zrt_go")
+            self.assertEqual(parts[3], str(terror))
+            self.assertEqual(parts[4], "0")
         self.assertEqual(_generations(player_rows[0][2]), {1})
         key = f"russian:{game.room_code}:day:1:terror"
         self.assertIn(key, game.mirror_prompt_messages)
@@ -195,11 +212,21 @@ class TerrorDayPanelTests(unittest.TestCase):
                     AsyncMock(), game, act="zok_ter", as_uid=terror, actor_uid=terror,
                     target_uid=citizen, generation=1,
                 )
-                return first, second
+                final = await route_russian_player_callback(
+                    AsyncMock(), game, act="zfin_ter", as_uid=terror, actor_uid=terror,
+                    target_uid=citizen, generation=1,
+                )
+                duplicate = await route_russian_player_callback(
+                    AsyncMock(), game, act="zfin_ter", as_uid=terror, actor_uid=terror,
+                    target_uid=citizen, generation=1,
+                )
+                return first, second, final, duplicate
 
-        first, second = _run(confirm())
-        self.assertEqual(first, "ok")
-        self.assertNotEqual(second, "ok")
+        first, second, final, duplicate = _run(confirm())
+        self.assertEqual(first, "pending")
+        self.assertEqual(second, "pending")
+        self.assertEqual(final, "ok")
+        self.assertEqual(duplicate, "rejected")
         self.assertFalse(game.players[terror].is_alive)
         self.assertFalse(game.players[citizen].is_alive)
         self.assertEqual(game.phase, Phase.NIGHT)
@@ -225,12 +252,17 @@ class TerrorDayPanelTests(unittest.TestCase):
                     AsyncMock(), won, act="zrm_ter", as_uid=terror_uid, actor_uid=terror_uid,
                     target_uid=boss, generation=1,
                 )
-                return await route_russian_player_callback(
+                one = await route_russian_player_callback(
                     AsyncMock(), won, act="zok_ter", as_uid=terror_uid, actor_uid=terror_uid,
                     target_uid=boss, generation=1,
                 )
+                two = await route_russian_player_callback(
+                    AsyncMock(), won, act="zfin_ter", as_uid=terror_uid, actor_uid=terror_uid,
+                    target_uid=boss, generation=1,
+                )
+                return one, two
 
-        self.assertEqual(_run(win()), "ok")
+        self.assertEqual(_run(win()), ("pending", "ok"))
         self.assertEqual(won.phase, Phase.ENDED)
         self.assertEqual(night.await_count, 0)
         self.assertFalse(won.players[_alive.__wrapped__] if False else won.players[
@@ -246,13 +278,13 @@ class TerrorDayPanelTests(unittest.TestCase):
         sent = _Sent()
         slots: list[str] = []
 
-        async def pair(bot, game, *, player_uid, slot, text, act, exclude, exclude_uids=None):
-            slots.append(slot)
+        async def stage_panel(bot, game):
+            slots.append("terror")
 
         async def cycle():
             patches = sent.patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch(
-                "bot.russian_mafia_flow._send_pair", new=pair
+                "bot.russian_mafia_flow._send_terror_stage_panel", new=stage_panel
             ):
                 await open_day(AsyncMock(), game)
                 self.assertEqual(slots.count("terror"), 1)

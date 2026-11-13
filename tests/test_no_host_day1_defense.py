@@ -48,6 +48,12 @@ def _no_exit_events(lines: list[dict]) -> list[dict]:
     ]
 
 
+def _day1_defense_outcome_rows(lines: list[dict]) -> list[dict]:
+    return [
+        row for row in lines if row.get("event") == "no_host.day1_defense_outcome"
+    ]
+
+
 class NoHostDay1DefenseTest(unittest.TestCase):
     def setUp(self) -> None:
         self.gm = GameManager()
@@ -150,7 +156,9 @@ class NoHostDay1DefenseNoExitDispatchTest(unittest.IsolatedAsyncioTestCase):
         set_day_vote_defender_uids(game, {20})
         return game
 
-    async def test_outcome_no_exit_enters_night(self) -> None:
+    async def test_outcome_no_exit_tentative_then_confirm_enters_night(self) -> None:
+        # Room 97 contract: «خروجی نداشتیم. شب کن» is a tentative selection —
+        # the press restyles the panel; night starts only via green confirm.
         game = self._outcome_game()
 
         cb = MagicMock()
@@ -161,18 +169,40 @@ class NoHostDay1DefenseNoExitDispatchTest(unittest.IsolatedAsyncioTestCase):
         bot = AsyncMock()
 
         with patch(
+            "bot.main.send_no_host_day1_defense_outcome_panel", new=AsyncMock()
+        ), patch("bot.main.on_no_host_entered_night1", new_callable=AsyncMock) as night:
+            await _dispatch_no_host_day1_defense_act(
+                cb, bot, game, 10, 10, "no_exit"
+            )
+
+        # Tentative only — the game did not advance.
+        self.assertTrue(game.no_host_day1_pending_no_elim)
+        self.assertEqual(game.no_host_day1_defense_phase, "outcome")
+        self.assertEqual(day_vote_participation_count(game, 20), 0)
+        cb.answer.assert_awaited_once_with("انتخاب شد؛ تأیید کنید.")
+        night.assert_not_awaited()
+
+        # Green confirm «✅ تأیید انتخاب» commits and enters night.
+        cb2 = MagicMock()
+        cb2.message = MagicMock()
+        cb2.message.html_text = "outcome"
+        cb2.message.text = "outcome"
+        cb2.answer = AsyncMock()
+
+        with patch(
             "bot.main.broadcast_to_alive_players", new_callable=AsyncMock
         ), patch(
             "bot.main.on_no_host_entered_night1", new_callable=AsyncMock
         ) as night:
             await _dispatch_no_host_day1_defense_act(
-                cb, bot, game, 10, 10, "no_exit"
+                cb2, bot, game, 10, 10, "d1ey"
             )
 
         self.assertFalse(game.no_host_day1_defense_active)
         self.assertIsNone(game.no_host_day1_defense_phase)
+        self.assertFalse(game.no_host_day1_pending_no_elim)
         self.assertEqual(day_vote_participation_count(game, 20), 1)
-        cb.answer.assert_awaited_once_with("ثبت شد.")
+        cb2.answer.assert_awaited_once_with("ثبت شد.")
         night.assert_awaited_once()
 
     async def test_outcome_keyboard_includes_no_exit_callback(self) -> None:
@@ -187,11 +217,11 @@ class NoHostDay1DefenseNoExitDispatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packed.act, "no_exit")
         self.assertEqual(normalize_day1_defense_act("d1d0"), "no_exit")
 
-    async def test_no_exit_success_writes_audit_callback_and_outcome(self) -> None:
+    async def test_no_exit_press_then_confirm_writes_audit_callback_and_outcome(self) -> None:
         game = self._outcome_game()
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("bot.config.game_audit_log_enabled", return_value=True), patch(
-                "bot.config.get_game_audit_log_dir", return_value=Path(tmp)
+            with patch("bot.game_audit_log.game_audit_log_enabled", return_value=True), patch(
+                "bot.game_audit_log.get_game_audit_log_dir", return_value=Path(tmp)
             ):
                 init_audit_log(game)
                 assert game.audit_log_path
@@ -204,6 +234,9 @@ class NoHostDay1DefenseNoExitDispatchTest(unittest.IsolatedAsyncioTestCase):
                 bot = AsyncMock()
 
                 with patch(
+                    "bot.main.send_no_host_day1_defense_outcome_panel",
+                    new=AsyncMock(),
+                ), patch(
                     "bot.main.broadcast_to_alive_players", new_callable=AsyncMock
                 ), patch("bot.main.on_no_host_entered_night1", new_callable=AsyncMock):
                     await _dispatch_no_host_day1_defense_act(
@@ -215,21 +248,37 @@ class NoHostDay1DefenseNoExitDispatchTest(unittest.IsolatedAsyncioTestCase):
                 self.assertGreaterEqual(len(no_exit_rows), 1)
                 received = [r for r in no_exit_rows if r.get("outcome") == "received"]
                 completed = [r for r in no_exit_rows if r.get("outcome") == "completed"]
+                # Tentative press: logged, nothing applied yet.
                 self.assertEqual(len(received), 1)
-                self.assertEqual(len(completed), 1)
+                self.assertEqual(len(completed), 0)
                 self.assertEqual(received[0]["source"], "nhd")
                 self.assertEqual(received[0]["phase"], "outcome")
-                outcomes = [
-                    r for r in lines if r.get("event") == "no_host.day1_defense_outcome"
-                ]
+                outcomes = _day1_defense_outcome_rows(lines)
+                self.assertEqual(len(outcomes), 0)
+
+                # Green confirm («d1ey») commits the no-exit outcome.
+                await _dispatch_no_host_day1_defense_act(
+                    cb, bot, game, 10, 10, "d1ey", source="nhd"
+                )
+
+                lines = _read_audit_lines(game.audit_log_path)
+                no_exit_rows = _no_exit_events(lines)
+                received = [r for r in no_exit_rows if r.get("outcome") == "received"]
+                completed = [r for r in no_exit_rows if r.get("outcome") == "completed"]
+                self.assertEqual(len(received), 1)
+                self.assertEqual(len(completed), 1)
+                outcomes = _day1_defense_outcome_rows(lines)
                 self.assertEqual(len(outcomes), 1)
                 self.assertFalse(outcomes[0]["had_exit"])
 
     async def test_each_no_exit_click_is_logged_separately(self) -> None:
         game = self._outcome_game()
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("bot.config.game_audit_log_enabled", return_value=True), patch(
-                "bot.config.get_game_audit_log_dir", return_value=Path(tmp)
+            with patch("bot.game_audit_log.game_audit_log_enabled", return_value=True), patch(
+                "bot.game_audit_log.get_game_audit_log_dir", return_value=Path(tmp)
+            ), patch(
+                "bot.main.send_no_host_day1_defense_outcome_panel",
+                new=AsyncMock(),
             ):
                 init_audit_log(game)
                 assert game.audit_log_path
@@ -240,7 +289,6 @@ class NoHostDay1DefenseNoExitDispatchTest(unittest.IsolatedAsyncioTestCase):
                 bot = AsyncMock()
 
                 for _ in range(3):
-                    game.no_host_day1_defense_phase = "pick"
                     await _dispatch_no_host_day1_defense_act(
                         cb, bot, game, 10, 10, "no_exit", source="nhd"
                     )
@@ -248,14 +296,13 @@ class NoHostDay1DefenseNoExitDispatchTest(unittest.IsolatedAsyncioTestCase):
                 lines = _read_audit_lines(game.audit_log_path)
                 no_exit_rows = _no_exit_events(lines)
                 received = [r for r in no_exit_rows if r.get("outcome") == "received"]
-                rejected = [
-                    r
-                    for r in no_exit_rows
-                    if r.get("outcome") == "rejected"
-                    and r.get("reject_reason") == "wrong_phase"
-                ]
+                completed = [r for r in no_exit_rows if r.get("outcome") == "completed"]
+                # Room 97: every press is audited; repeated presses toggle the
+                # tentative selection and never enter the night directly.
                 self.assertEqual(len(received), 3)
-                self.assertEqual(len(rejected), 3)
+                self.assertEqual(len(completed), 0)
+                self.assertEqual(len(_day1_defense_outcome_rows(lines)), 0)
+                self.assertTrue(game.no_host_day1_pending_no_elim)
 
     async def test_no_exit_wrong_phase_rejected_without_entering_night(self) -> None:
         game = self._outcome_game()

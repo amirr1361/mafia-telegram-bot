@@ -877,9 +877,42 @@ def _collect_mason_night_skip_notes(game: Game) -> list[str]:
     return notes
 
 
+def mason_recipient_ready_for_pending_delivery(game: Game, uid: int) -> bool:
+    """آیا گیرندهٔ پیام در انتظار، برای فاز جاری آماده است؟ (فقط سناریوی ماسون)
+
+    منبع اصلی آمادگی: پرچم تأیید نقشِ دارندهٔ اقدام شبانه، اوکیِ «بدون اقدام»
+    (mason_night_wait_ok_uids) یا خودکفایی خودکار (تفنگدار/اسنایپر/فرمانده
+    بدون گلوله). اگر فاز جاری دیگر جمع‌آوری شب موازی نباشد (روز/اتمام)،
+    True — پیام در انتظار نباید گم شود.
+    """
+    if not is_mason_scenario(game):
+        return True
+    if not no_host_parallel_night_collect_active(game):
+        return True
+    player = game.players.get(uid)
+    if player is None or not player.is_alive:
+        return True
+    holders = _night_wait_ok_holder_uids(game)
+    if uid in holders:
+        return _night_action_holder_reason(game, uid) is None
+    if uid in game.mason_night_wait_ok_uids:
+        return True
+    return _player_auto_satisfied_wait_ok(game, player)
+
+
 async def maybe_finish_mason_parallel_night(
     bot: Bot, game: Game, gm: "GameManager"
 ) -> None:
+    from bot.mason_recruit_delivery import flush_pending_mason_recruit_deliveries
+
+    try:
+        await flush_pending_mason_recruit_deliveries(bot, game, gm)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "mason recruit pending flush failed room=%s", game.room_code
+        )
     try:
         from bot.mason_night_reminder import refresh_mason_night_helper_reminder
 

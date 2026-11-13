@@ -62,6 +62,7 @@ from bot.post_game_flow import (
 )
 from bot.room_mode import (
     bazpors_lobby_dev_fill_enabled,
+    is_namayande10_no_host_room,
     host_receives_moderator_deal_messages,
     is_bazpors_narrator_room,
     is_bazpors_no_host_room,
@@ -648,15 +649,8 @@ def player_count_keyboard(slug: str) -> InlineKeyboardMarkup:
                 ],
                 [
                     InlineKeyboardButton(
-                        text=f"{n} بازیکن",
-                        callback_data=CreatePickPlayers(slug=slug, count=n).pack(),
-                    )
-                    for n in (13, 14)
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="۱۶ بازیکن",
-                        callback_data=CreatePickPlayers(slug=slug, count=16).pack(),
+                        text="۱۳ بازیکن",
+                        callback_data=CreatePickPlayers(slug=slug, count=13).pack(),
                     ),
                 ],
             ]
@@ -1065,7 +1059,18 @@ def build_join_preview_html(game: Game) -> str:
     sc = html.escape(manager.scenario_display_name(game.scenario_name))
     room_no = html.escape(_fa_digits(int(game.room_code)))
     cap = html.escape(_fa_digits(game.max_players))
-    roles = manager.intended_roles_for_room(game.scenario_name, game.max_players)
+    from bot.room_mode import is_namayande10_no_host_room
+
+    roles = manager.intended_roles_for_room(
+        game.scenario_name,
+        game.max_players,
+        nam10_no_host=is_namayande10_no_host_room(game),
+    )
+    if is_namayande10_no_host_room(game):
+        from bot.nam10.role_labels import nam10_role_label_fa as _join_label
+
+    else:
+        _join_label = role_label_fa
     mafia_roles = [r for r in roles if is_mafia_team(r)]
     town_roles = [r for r in roles if not is_mafia_team(r)]
     lines = [
@@ -1077,10 +1082,10 @@ def build_join_preview_html(game: Game) -> str:
         "🟥 نقش‌های مافیا:",
     ]
     for r in mafia_roles:
-        lines.append(f"- {html.escape(role_label_fa(r))}")
+        lines.append(f"- {html.escape(_join_label(r))}")
     lines.extend(["", "🟦 نقش‌های شهروندی:"])
     for r in town_roles:
-        lines.append(f"- {html.escape(role_label_fa(r))}")
+        lines.append(f"- {html.escape(_join_label(r))}")
     lines.extend(["", "👤 لیست بازیکنان کنونی:"])
     players = _players_in_lobby_join_order(game)
     if not players:
@@ -1298,9 +1303,19 @@ def build_private_role_message_html(
         from bot.russian_mafia import russian_role_description_fa, russian_role_label_fa
 
         label = russian_role_label_fa(role)
+        role_html = (
+            "<b>"
+            + _private_role_spoiler_html(
+                label, min_chars=PRIVATE_ROLE_SPOILER_MIN_CHARS
+            )
+            + "</b>"
+        )
+        desc_html = _private_role_spoiler_html(
+            russian_role_description_fa(role, game)
+        )
         return (
-            "🎭 نقش شما: <b>" + html.escape(label) + "</b>\n"
-            + html.escape(russian_role_description_fa(role, game))
+            f"🎭 نقش شما: {role_html}\n\n"
+            f"{desc_html}"
         )
     if game is not None and is_mozakere_scenario(game):
         from bot.mozakere_role_descriptions import mozakere_role_description_fa
@@ -1323,6 +1338,31 @@ def build_private_role_message_html(
         from bot.mason_role_descriptions import build_mason_private_role_message_html
 
         return build_mason_private_role_message_html(role)
+
+    if game is not None and is_namayande10_no_host_room(game):
+        # Namayande-10 fork: text-only reveal, no role image. The
+        # role name and its full description stay hidden behind the
+        # Telegram spoiler bar until the player taps it.
+        from bot.nam10.role_labels import (
+            nam10_role_description_fa,
+            nam10_role_label_fa,
+        )
+
+        label = nam10_role_label_fa(role)
+        role_html = (
+            "<b>"
+            + _private_role_spoiler_html(
+                label, min_chars=PRIVATE_ROLE_SPOILER_MIN_CHARS
+            )
+            + "</b>"
+        )
+        desc_html = _private_role_spoiler_html(
+            nam10_role_description_fa(role)
+        )
+        return (
+            f"🎭 نقش شما: {role_html}\n\n"
+            f"{desc_html}"
+        )
 
     if game is not None:
         label = html.escape(scenario_role_label_fa(game, role))
@@ -1371,6 +1411,7 @@ async def send_private_role(
         and (
             is_mozakere_scenario(game)
             or is_mason_scenario(game)
+            or is_namayande10_no_host_room(game)
             or game.scenario_name == "russian_mafia"
         )
         else role_card_image_path(role)
@@ -1602,6 +1643,15 @@ async def finalize_no_host_bot_assistant(
     bot: Bot, game: Game, assistant_uid: int, *, random_pick: bool = True
 ) -> None:
     if not no_host_bot_assistant_flow_enabled(game):
+        return
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if is_namayande10_no_host_room(game):
+        from bot.nam10.dayflow import (
+            finalize_no_host_bot_assistant as _nam10_finalize,
+        )
+
+        await _nam10_finalize(bot, game, assistant_uid, random_pick=random_pick)
         return
     game.bot_assistant_user_id = assistant_uid
     game.no_host_assistant_narrator_active = True
@@ -2226,6 +2276,80 @@ def build_no_host_day1_defense_pick_html(game: Game) -> str:
     )
 
 
+NO_HOST_DAY1_NONE_CONFIRM_HTML = (
+    "⚠️ تأیید عدم برگزاری دفاعیه\n\n"
+    "آیا مطمئن هستید که هیچ بازیکنی برای دفاعیه انتخاب نشده است؟\n\n"
+    "با تأیید این گزینه، مرحله دفاعیه بدون انتخاب بازیکن پایان می‌یابد "
+    "و بازی طبق روال فعلی به مرحله بعد می‌رود."
+)
+
+
+def _no_host_day1_none_confirm_keyboard(
+    game: Game, assistant_uid: int, *, mirror: bool
+) -> InlineKeyboardMarkup:
+    """بازپرس: دکمه‌های تأیید «دفاعیه نداریم» — تأیید سبز، بازگشت خنثی."""
+    if mirror:
+        yes_cb = PlayerMirrorCb(
+            code=game.room_code, act="d1nf", as_uid=assistant_uid
+        ).pack()
+        back_cb = PlayerMirrorCb(
+            code=game.room_code, act="d1nb", as_uid=assistant_uid
+        ).pack()
+    else:
+        yes_cb = NoHostDay1DefenseCb(code=game.room_code, act="nonc").pack()
+        back_cb = NoHostDay1DefenseCb(code=game.room_code, act="nonb").pack()
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ تأیید نهایی",
+                    callback_data=yes_cb,
+                    **_day1_defense_panel_style_kwargs(game, success=True),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ بازگشت",
+                    callback_data=back_cb,
+                )
+            ],
+        ]
+    )
+
+
+def _russian_panel_style_kwargs(
+    game: Game, *, selected: bool = False, success: bool = False
+) -> dict[str, str]:
+    if game.scenario_name != "russian_mafia":
+        return {}
+    from bot.player_role_pick_common import inline_button_supports_style
+
+    if not inline_button_supports_style():
+        return {}
+    if success:
+        return {"style": "success"}
+    return {"style": "danger" if selected else "primary"}
+
+
+def _day1_defense_panel_style_kwargs(
+    game: Game, *, selected: bool = False, success: bool = False
+) -> dict[str, str]:
+    """رنگ دکمه‌های پنل دفاعیه — فقط سناریوی بازپرس.
+
+    بازیکنان: آبی (primary)؛ انتخاب‌شده: قرمز (danger)؛
+    «برو به مرحله بعد» و «دفاعیه نداریم»: سبز (success).
+    """
+    if game.scenario_name != "bazpors":
+        return {}
+    from bot.player_role_pick_common import inline_button_supports_style
+
+    if not inline_button_supports_style():
+        return {}
+    if success:
+        return {"style": "success"}
+    return {"style": "danger" if selected else "primary"}
+
+
 def _no_host_day1_defense_pick_keyboard(
     game: Game, assistant_uid: int, *, mirror: bool
 ) -> InlineKeyboardMarkup:
@@ -2246,7 +2370,16 @@ def _no_host_day1_defense_pick_keyboard(
             cb = NoHostDay1DefenseCb(
                 code=game.room_code, act="tog", tid=p.user_id
             ).pack()
-        row.append(InlineKeyboardButton(text=f"{tick} {name}", callback_data=cb))
+        row.append(
+            InlineKeyboardButton(
+                text=f"{tick} {name}",
+                callback_data=cb,
+                **_russian_panel_style_kwargs(game, selected=p.user_id in picked),
+                **_day1_defense_panel_style_kwargs(
+                    game, selected=p.user_id in picked
+                ),
+            )
+        )
         if len(row) >= 2:
             rows.append(row)
             row = []
@@ -2269,6 +2402,7 @@ def _no_host_day1_defense_pick_keyboard(
             InlineKeyboardButton(
                 text="⏭️ برو به مرحله بعد",
                 callback_data=confirm_cb,
+                **_day1_defense_panel_style_kwargs(game, success=True),
             )
         ]
     )
@@ -2277,6 +2411,7 @@ def _no_host_day1_defense_pick_keyboard(
             InlineKeyboardButton(
                 text="🌙 دفاعیه نداریم",
                 callback_data=none_cb,
+                **_day1_defense_panel_style_kwargs(game, success=True),
             )
         ]
     )
@@ -2414,6 +2549,8 @@ def _no_host_day1_defense_outcome_keyboard(
     game: Game, assistant_uid: int, *, mirror: bool
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    pending = game.no_host_day1_pending_elim_uid
+    is_bazpors = game.scenario_name == "bazpors"
     for p in _day1_defense_pool_players(game):
         name = html.escape(manager.format_player_tag(p)[:28])
         if mirror:
@@ -2427,11 +2564,18 @@ def _no_host_day1_defense_outcome_keyboard(
             cb = NoHostDay1DefenseCb(
                 code=game.room_code, act="d1el", tid=p.user_id
             ).pack()
+        style_kwargs = _russian_panel_style_kwargs(game)
+        if not style_kwargs and is_bazpors:
+            # Bazpors: options blue, pending elimination red.
+            style_kwargs = _day1_defense_panel_style_kwargs(
+                game, selected=(pending == p.user_id)
+            )
         rows.append(
             [
                 InlineKeyboardButton(
                     text=f"خروج ({name})",
                     callback_data=cb,
+                    **style_kwargs,
                 )
             ]
         )
@@ -2448,9 +2592,36 @@ def _no_host_day1_defense_outcome_keyboard(
             InlineKeyboardButton(
                 text="خروجی نداشتیم. شب کن",
                 callback_data=no_cb,
+                **(
+                    _day1_defense_panel_style_kwargs(
+                        game, selected=bool(game.no_host_day1_pending_no_elim)
+                    )
+                    if is_bazpors
+                    else _russian_panel_style_kwargs(game)
+                ),
             )
         ]
     )
+    if is_bazpors:
+        # Exactly one green confirm from the initial rendering; the
+        # elimination commits only through it (reuses d1ey/elim_yes).
+        if mirror:
+            confirm_cb = PlayerMirrorCb(
+                code=game.room_code, act="d1ey", as_uid=assistant_uid
+            ).pack()
+        else:
+            confirm_cb = NoHostDay1DefenseCb(
+                code=game.room_code, act="elim_yes"
+            ).pack()
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ تأیید انتخاب",
+                    callback_data=confirm_cb,
+                    **_day1_defense_panel_style_kwargs(game, success=True),
+                )
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2469,7 +2640,13 @@ def _no_host_day1_pick_elim_keyboard(
             cb = NoHostDay1DefenseCb(
                 code=game.room_code, act="d1el", tid=p.user_id
             ).pack()
-        row.append(InlineKeyboardButton(text=name, callback_data=cb))
+        row.append(
+            InlineKeyboardButton(
+                text=name,
+                callback_data=cb,
+                **_russian_panel_style_kwargs(game),
+            )
+        )
         if len(row) >= 2:
             rows.append(row)
             row = []
@@ -2511,6 +2688,7 @@ def _no_host_day1_confirm_elim_keyboard(
                 InlineKeyboardButton(
                     text="🔹 بله، تأیید و حذف از بازی",
                     callback_data=yes_cb,
+                    **_russian_panel_style_kwargs(game, success=True),
                 )
             ],
             [
@@ -2612,6 +2790,37 @@ async def send_no_host_day1_defense_outcome_panel(bot: Bot, game: Game) -> None:
         game, assistant_uid, mirror=game_observer_mirror_active(game)
     )
     ui_key = _no_host_day1_defense_outcome_ui_key(game, assistant_uid)
+    # Room 83 (Bazpors): outcome-selection presses must keep ONE panel —
+    # update the tracked message(s) in place, never send a duplicate.
+    entry = game.mirror_prompt_messages.get(ui_key) or {}
+    if any(
+        isinstance(entry.get(role), tuple) and len(entry[role]) == 2
+        for role in ("player", "observer")
+    ):
+        await update_mirror_prompt_pair(
+            bot,
+            game,
+            ui_key,
+            text,
+            kb,
+            assistant_uid=assistant_uid,
+            parse_mode="HTML",
+        )
+        return
+    pick_key = _no_host_day1_pick_elim_ui_key(game, assistant_uid)
+    confirm_key = _no_host_day1_confirm_elim_ui_key(game, assistant_uid)
+    for from_key in (pick_key, confirm_key):
+        if await promote_mirror_prompt_to_panel(
+            bot,
+            game,
+            from_ui_key=from_key,
+            to_ui_key=ui_key,
+            assistant_uid=assistant_uid,
+            text=text,
+            reply_markup=kb,
+            parse_mode="HTML",
+        ):
+            return
     await register_mirror_prompt_pair(
         bot,
         game,
@@ -2669,6 +2878,7 @@ async def _no_host_day1_defense_confirm(
         for u in day_vote_pick_uids(game)
         if u in game.players and game.players[u].is_alive
     }
+    game.no_host_day1_defense_none_confirm_active = False
     set_day_vote_defender_uids(game, picked)
     set_day_vote_pick_uids(game, set())
     from bot.russian_mafia_flow import note_russian_defense_candidates
@@ -2781,12 +2991,133 @@ async def _no_host_day1_defense_no_votes(
         pass
 
 
+async def _no_host_day1_defense_none_confirm_open(
+    callback: CallbackQuery,
+    bot: Bot,
+    game: Game,
+    assistant_uid: int,
+    actor_uid: int,
+) -> None:
+    """بازپرس: «دفاعیه نداریم» بدون تأیید، بازی را جلو نمی‌برد."""
+    if game.no_host_day1_defense_phase != "pick":
+        await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+        return
+    game.no_host_day1_defense_none_confirm_active = True
+    await callback.answer("برای پایان دفاعیه تأیید لازم است.")
+    mirror = game_observer_mirror_active(game)
+    confirm_kb = _no_host_day1_none_confirm_keyboard(
+        game, assistant_uid, mirror=mirror
+    )
+    try:
+        await update_mirror_prompt_pair(
+            bot,
+            game,
+            _no_host_day1_defense_pick_ui_key(game, assistant_uid),
+            NO_HOST_DAY1_NONE_CONFIRM_HTML,
+            confirm_kb,
+            assistant_uid=assistant_uid,
+        )
+    except Exception:
+        try:
+            if callback.message:
+                await callback.message.edit_text(
+                    NO_HOST_DAY1_NONE_CONFIRM_HTML,
+                    reply_markup=confirm_kb,
+                )
+        except Exception:
+            pass
+    try:
+        from bot.game_audit_log import log_event
+
+        log_event(
+            game,
+            "no_host.day1_defense_none_confirm_opened",
+            assistant_uid=assistant_uid,
+            actor_uid=actor_uid,
+        )
+    except Exception:
+        pass
+
+
+async def _no_host_day1_defense_none_confirm_back(
+    callback: CallbackQuery,
+    bot: Bot,
+    game: Game,
+    assistant_uid: int,
+    actor_uid: int,
+) -> None:
+    """بازپرس: بازگشت به پنل انتخاب دفاعیه — انتخاب‌های در انتظار حفظ می‌شوند."""
+    if (
+        game.no_host_day1_defense_phase != "pick"
+        or not game.no_host_day1_defense_none_confirm_active
+    ):
+        await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+        return
+    game.no_host_day1_defense_none_confirm_active = False
+    await callback.answer("بازگشت به پنل انتخاب دفاعیه.")
+    try:
+        await refresh_no_host_day1_defense_pick_panel(bot, game)
+    except Exception:
+        pass
+
+
+async def _no_host_day1_defense_none_confirm_yes(
+    callback: CallbackQuery,
+    bot: Bot,
+    game: Game,
+    assistant_uid: int,
+    actor_uid: int,
+) -> None:
+    """بازپرس: تأیید نهایی — همان مسیر «دفاعیه نداریم» موجود، دقیقاً یک‌بار."""
+    if (
+        game.no_host_day1_defense_phase != "pick"
+        or not game.no_host_day1_defense_none_confirm_active
+    ):
+        await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+        return
+    game.no_host_day1_defense_none_confirm_active = False
+    await _no_host_day1_defense_no_votes(
+        callback, bot, game, assistant_uid, actor_uid
+    )
+
+
+async def _no_host_day1_defense_outcome_no_exit_pick(
+    callback: CallbackQuery,
+    bot: Bot,
+    game: Game,
+    assistant_uid: int,
+    actor_uid: int,
+) -> None:
+    """Bazpors: «خروجی نداشتیم. شب کن» is a tentative selectable option —
+    red restyle on the same panel; commits only via «✅ تأیید انتخاب»."""
+    if game.no_host_day1_defense_phase != "outcome":
+        await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+        return
+    # Room 20 (Bazpors): NO one-shot mirror-claim gate here. This handler is
+    # a pure toggle (pending_no_elim on/off) that must stay repeatable for
+    # both the assistant and the observer until the green confirm commits —
+    # a claim on `day1_defense_outcome:<room>:<assistant>` returns "dup_self"
+    # on every later press and answer_http froze the panel before toggling.
+    # Actor authorization is enforced at dispatch level; panel sync happens
+    # via the in-place sender (send_no_host_day1_defense_outcome_panel).
+    if game.no_host_day1_pending_no_elim:
+        game.no_host_day1_pending_no_elim = False
+        await callback.answer("انتخاب لغو شد.")
+    else:
+        game.no_host_day1_pending_elim_uid = None
+        game.no_host_day1_pending_no_elim = True
+        await callback.answer("انتخاب شد؛ تأیید کنید.")
+    await send_no_host_day1_defense_outcome_panel(bot, game)
+
+
 async def _no_host_day1_defense_outcome_no_exit(
     callback: CallbackQuery,
     bot: Bot,
     game: Game,
     assistant_uid: int,
     actor_uid: int,
+    *,
+    claim: bool = True,
 ) -> None:
     if game.no_host_day1_defense_phase not in ("outcome", "pick_elim"):
         try:
@@ -2806,7 +3137,7 @@ async def _no_host_day1_defense_outcome_no_exit(
         await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
         return
     ui_key = _no_host_day1_defense_outcome_ui_key(game, assistant_uid)
-    if game_observer_mirror_active(game):
+    if claim and game_observer_mirror_active(game):
         if await _answer_mirror_claim(
             callback,
             try_claim_mirror_ui(game, ui_key, actor_uid, assistant_uid),
@@ -2814,6 +3145,22 @@ async def _no_host_day1_defense_outcome_no_exit(
             return
         await apply_mirror_claim_winner(bot, game, ui_key, actor_uid, assistant_uid)
     game.no_host_day1_pending_elim_uid = None
+    game.no_host_day1_pending_no_elim = False
+    await _no_host_day1_defense_outcome_no_exit_commit(
+        callback, bot, game, assistant_uid, actor_uid
+    )
+
+
+async def _no_host_day1_defense_outcome_no_exit_commit(
+    callback: CallbackQuery,
+    bot: Bot,
+    game: Game,
+    assistant_uid: int,
+    actor_uid: int,
+) -> None:
+    """Commit the «no elimination → night» outcome — phase is validated by
+    the caller (direct «no_exit» press for non-Bazpors scenarios or the
+    green «✅ تأیید انتخاب» confirm for Bazpors)."""
     await callback.answer("ثبت شد.")
     try:
         if callback.message:
@@ -2929,6 +3276,21 @@ async def _no_host_day1_defense_pick_elim(
             show_alert=True,
         )
         return
+    if (
+        game.no_host_day1_defense_phase == "outcome"
+        and game.scenario_name == "bazpors"
+    ):
+        # Outcome panel (Bazpors): the pick stays tentative — red restyle
+        # on the same panel — and commits only via «✅ تأیید انتخاب».
+        game.no_host_day1_pending_no_elim = False
+        if game.no_host_day1_pending_elim_uid == target_uid:
+            game.no_host_day1_pending_elim_uid = None
+            await callback.answer("انتخاب لغو شد.")
+        else:
+            game.no_host_day1_pending_elim_uid = target_uid
+            await callback.answer("انتخاب شد؛ تأیید کنید.")
+        await send_no_host_day1_defense_outcome_panel(bot, game)
+        return
     game.no_host_day1_pending_elim_uid = target_uid
     game.no_host_day1_defense_phase = "confirm_elim"
     await callback.answer("تأیید کنید.")
@@ -2942,17 +3304,38 @@ async def _no_host_day1_defense_confirm_elim_yes(
     assistant_uid: int,
     actor_uid: int,
 ) -> None:
-    if game.no_host_day1_defense_phase != "confirm_elim":
+    outcome_commit = (
+        game.scenario_name == "bazpors"
+        and game.no_host_day1_defense_phase == "outcome"
+    )
+    if game.no_host_day1_defense_phase != "confirm_elim" and not outcome_commit:
         await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
         return
     target_uid = game.no_host_day1_pending_elim_uid
+    if outcome_commit and game.no_host_day1_pending_no_elim:
+        # بازپرس: تأیید گزینهٔ «خروجی نداشتیم» — بدون هیچ خروجی، وارد شب.
+        game.no_host_day1_pending_no_elim = False
+        game.no_host_day1_pending_elim_uid = None
+        await _no_host_day1_defense_outcome_no_exit_commit(
+            callback, bot, game, assistant_uid, actor_uid
+        )
+        return
+    if outcome_commit and target_uid is None:
+        await callback.answer(
+            "ابتدا یکی از گزینه‌ها را انتخاب کنید.", show_alert=True
+        )
+        return
     if target_uid is None or target_uid not in game.players:
         await callback.answer("بازیکن انتخاب نشده.", show_alert=True)
         return
     if not game.players[target_uid].is_alive:
         await callback.answer("این بازیکن قبلاً خارج شده است.", show_alert=True)
         return
-    ui_key = _no_host_day1_confirm_elim_ui_key(game, assistant_uid)
+    ui_key = (
+        _no_host_day1_defense_outcome_ui_key(game, assistant_uid)
+        if outcome_commit
+        else _no_host_day1_confirm_elim_ui_key(game, assistant_uid)
+    )
     if game_observer_mirror_active(game):
         if await _answer_mirror_claim(
             callback,
@@ -2974,6 +3357,8 @@ async def _no_host_day1_defense_confirm_elim_yes(
     eliminate_player_from_game(
         game, manager, target_uid, elim_source="day_vote"
     )
+    game.no_host_day1_pending_elim_uid = None
+    game.no_host_day1_pending_no_elim = False
     armor_saved = game.players[target_uid].is_alive
     if not armor_saved:
         from bot.room_mode import is_mason_scenario
@@ -3153,11 +3538,34 @@ async def _dispatch_no_host_day1_defense_act(
         )
         return
     if act in ("none", "d1dn"):
+        if game.scenario_name == "bazpors":
+            # بازپرس: تأیید دومرحله‌ای «دفاعیه نداریم» — بدون پیش‌بردن بازی.
+            await _no_host_day1_defense_none_confirm_open(
+                callback, bot, game, assistant_uid, actor_uid
+            )
+            return
         await _no_host_day1_defense_no_votes(
             callback, bot, game, assistant_uid, actor_uid
         )
         return
+    if act in ("nonc", "d1nf") and game.scenario_name == "bazpors":
+        await _no_host_day1_defense_none_confirm_yes(
+            callback, bot, game, assistant_uid, actor_uid
+        )
+        return
+    if act in ("nonb", "d1nb") and game.scenario_name == "bazpors":
+        await _no_host_day1_defense_none_confirm_back(
+            callback, bot, game, assistant_uid, actor_uid
+        )
+        return
     if act in ("no_exit", "d1d0"):
+        if game.scenario_name == "bazpors":
+            # بازپرس: گزینهٔ «خروجی نداشتیم» انتخاب موقتی است؛ اجرای شب فقط
+            # با تأیید سبز (d1ey/elim_yes).
+            await _no_host_day1_defense_outcome_no_exit_pick(
+                callback, bot, game, assistant_uid, actor_uid
+            )
+            return
         await _no_host_day1_defense_outcome_no_exit(
             callback, bot, game, assistant_uid, actor_uid
         )
@@ -3200,6 +3608,34 @@ async def _dispatch_no_host_day1_defense_act(
     await callback.answer("عمل نامعتبر.", show_alert=True)
 
 
+async def _resync_observer_night_panels_after_register(bot: Bot, game: Game) -> None:
+    """Open night-panel mirror replays after observer (re-)registration.
+
+    Each scenario uses its own gated resync helpers; calling the wrong
+    scenario's helpers would be a no-op at best and a wrong-panel replay at
+    worst, so the fork routes to its independent bot/nam10 copies.
+    """
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if is_namayande10_no_host_room(game):
+        from bot.nam10.no_host_night_entry import (
+            resync_observer_night_entry_panels as nam10_entry_resync,
+        )
+        from bot.nam10.no_host_night_sage_quote import (
+            resync_observer_night_sage_quotes as nam10_sage_resync,
+        )
+
+        await nam10_sage_resync(bot, game)
+        await nam10_entry_resync(bot, game, manager)
+        return
+    if game.bazpors_host_mode == "no_host":
+        from bot.no_host_night_entry import resync_observer_night_entry_panels
+        from bot.no_host_night_sage_quote import resync_observer_night_sage_quotes
+
+        await resync_observer_night_sage_quotes(bot, game)
+        await resync_observer_night_entry_panels(bot, game, manager)
+
+
 _OBSERVER_REGISTER_ERRORS_FA: dict[str, str] = {
     "invalid_code": "کد ناظر نامعتبر است.",
     "not_no_host": "این اتاق حالت بدون گرداننده ندارد.",
@@ -3236,13 +3672,8 @@ async def register_observer_via_command(
     )
     if err == "already_registered":
         if game.observer_user_id == msg.from_user.id:
-            from bot.no_host_night_entry import resync_observer_night_entry_panels
-            from bot.no_host_night_sage_quote import resync_observer_night_sage_quotes
-
             await send_observer_players_roster(bot, game, manager)
-            if game.bazpors_host_mode == "no_host":
-                await resync_observer_night_sage_quotes(bot, game)
-                await resync_observer_night_entry_panels(bot, game, manager)
+            await _resync_observer_night_panels_after_register(bot, game)
             room = html.escape(game.room_code)
             await msg.answer(
                 f"شما قبلاً ناظر اتاق <code>{room}</code> بودید.\n"
@@ -3275,12 +3706,7 @@ async def register_observer_via_command(
         parse_mode="HTML",
     )
     await send_observer_players_roster(bot, game, manager)
-    if game.bazpors_host_mode == "no_host":
-        from bot.no_host_night_entry import resync_observer_night_entry_panels
-        from bot.no_host_night_sage_quote import resync_observer_night_sage_quotes
-
-        await resync_observer_night_sage_quotes(bot, game)
-        await resync_observer_night_entry_panels(bot, game, manager)
+    await _resync_observer_night_panels_after_register(bot, game)
     try:
         await bot.send_message(
             game.host_id,
@@ -3302,7 +3728,19 @@ async def register_observer_via_command(
     except Exception:
         pass
     if no_host_bot_assistant_flow_enabled(game) and game.bot_assistant_user_id is not None:
-        if game.no_host_intro_night_started:
+        from bot.room_mode import is_namayande10_no_host_room
+
+        if is_namayande10_no_host_room(game):
+            if game.nam10_intro_night_started:
+                # Shared delivery already mirrors the civilian copies to the observer.
+                await deliver_no_host_intro_night_started_messages(bot, game)
+            else:
+                from bot.nam10.dayflow import (
+                    send_no_host_intro_night_start_prompt as send_nam10_intro_night_start_prompt,
+                )
+
+                await send_nam10_intro_night_start_prompt(bot, game, observer_only=True)
+        elif game.no_host_intro_night_started:
             if is_mason_scenario(game):
                 from bot.mason_intro_flow import deliver_mason_intro_night_started_messages
 
@@ -3419,9 +3857,23 @@ def _recap_row_counts_as_mafia(row: dict[str, object]) -> bool:
     return is_mafia_team(_role_from_snap_value(row.get("role")))
 
 
-def _recap_scenario_role_label(scenario_name: str, role: Role | None) -> str:
+def _snap_is_nam10_fork(snap: dict[str, object]) -> bool:
+    """آیا جمع‌بندی مربوط به اتاق نمایندهٔ ۱۰ نفرهٔ مستقل است؟"""
+    return (
+        str(snap.get("scenario_name") or "") == "namayande"
+        and snap.get("nmnd_host_mode") == "no_host"
+    )
+
+
+def _recap_scenario_role_label(
+    scenario_name: str, role: Role | None, *, nam10: bool = False
+) -> str:
     if role is None:
         return "نامشخص"
+    if nam10:
+        from bot.nam10.role_labels import nam10_role_label_fa
+
+        return nam10_role_label_fa(role)
     if scenario_name == "mozakere":
         from bot.game import mozakere_role_label_fa
 
@@ -3430,19 +3882,19 @@ def _recap_scenario_role_label(scenario_name: str, role: Role | None) -> str:
 
 
 def _recap_roster_name_and_role(
-    row: dict[str, object], *, scenario_name: str = "bazpors"
+    row: dict[str, object], *, scenario_name: str = "bazpors", nam10: bool = False
 ) -> tuple[str, str]:
     tag = str(row.get("tag") or "بازیکن نامشخص")
     role = _role_from_snap_value(row.get("role"))
     if bool(row.get("yakuza_converted")):
         show_role = _role_from_snap_value(row.get("original_role")) or role
-        role_txt = _recap_scenario_role_label(scenario_name, show_role)
+        role_txt = _recap_scenario_role_label(scenario_name, show_role, nam10=nam10)
         return f"{tag} (یاکوزایی شده)", role_txt
     if bool(row.get("mozakere_converted_by_negotiation")):
         show_role = _role_from_snap_value(row.get("mozakere_original_role")) or role
-        role_txt = _recap_scenario_role_label(scenario_name, show_role)
+        role_txt = _recap_scenario_role_label(scenario_name, show_role, nam10=nam10)
         return f"{tag} (مذاکره)", role_txt
-    role_txt = _recap_scenario_role_label(scenario_name, role)
+    role_txt = _recap_scenario_role_label(scenario_name, role, nam10=nam10)
     return tag, role_txt
 
 
@@ -3451,6 +3903,7 @@ def _build_session_recap_roster_lines(
     *,
     medal_by_uid: dict[int, str] | None = None,
     scenario_name: str = "bazpors",
+    nam10: bool = False,
 ) -> list[str]:
     """فهرست پایان دست: مافیا (نقش‌دار → ساده) سپس شهروند (نقش‌دار → ساده)."""
     medals = medal_by_uid or {}
@@ -3476,7 +3929,7 @@ def _build_session_recap_roster_lines(
     lines: list[str] = []
     for row, _role, seat, uid in mafia:
         name_txt, role_txt = _recap_roster_name_and_role(
-            row, scenario_name=scenario_name
+            row, scenario_name=scenario_name, nam10=nam10
         )
         medal = f" {medals[uid]}" if uid in medals else ""
         lines.append(
@@ -3485,7 +3938,7 @@ def _build_session_recap_roster_lines(
         )
     for row, _role, seat, uid in citizens:
         name_txt, role_txt = _recap_roster_name_and_role(
-            row, scenario_name=scenario_name
+            row, scenario_name=scenario_name, nam10=nam10
         )
         medal = f" {medals[uid]}" if uid in medals else ""
         lines.append(
@@ -3608,15 +4061,30 @@ def _timeline_night_lines_from_bazpors(
     *,
     records: list[dict[str, object]] | None = None,
     night_no: int | None = None,
+    nam10: bool = False,
 ) -> list[str]:
     """اقدامات ثبت‌شدهٔ یک شب ناتمام — وقتی night.resolved ثبت نشده."""
     lines: list[str] = []
+    if nam10:
+        lab_hunter, lab_shiad, lab_det_q, lab_interrog = (
+            "وکیل",
+            "هکر",
+            "محافظ",
+            "راهنما",
+        )
+    else:
+        lab_hunter, lab_shiad, lab_det_q, lab_interrog = (
+            "هانتر",
+            "شیاد",
+            "کارآگاه",
+            "بازپرس",
+        )
     try:
         hunter_link = int(bz["hunter_link_uid"])
     except (KeyError, TypeError, ValueError):
         hunter_link = None
     if hunter_link is not None and bz.get("hunter_linked_this_night"):
-        lines.append(f"🏹 هانتر: {tag_for_uid(hunter_link)}")
+        lines.append(f"🏹 {lab_hunter}: {tag_for_uid(hunter_link)}")
     try:
         shot_t = int(bz["mafia_target"])
     except (KeyError, TypeError, ValueError):
@@ -3633,7 +4101,7 @@ def _timeline_night_lines_from_bazpors(
     except (KeyError, TypeError, ValueError):
         shiad_t = None
     if shiad_t is not None:
-        lines.append(f"🎭 شیاد: {tag_for_uid(shiad_t)}")
+        lines.append(f"🎭 {lab_shiad}: {tag_for_uid(shiad_t)}")
     if not bz.get("det_no_inquiry"):
         try:
             det_t = int(bz["detective_check"])
@@ -3646,12 +4114,12 @@ def _timeline_night_lines_from_bazpors(
 
             res = load_detective_inquiry_label_from_snapshot(bz)
             if res is not None:
-                lines.append(f"🕵️ استعلام کارآگاه: {tag_for_uid(det_t)} — {res}")
+                lines.append(f"🕵️ استعلام {lab_det_q}: {tag_for_uid(det_t)} — {res}")
     u1, u2 = bz.get("interrog_first_uid"), bz.get("interrog_second_uid")
     if bz.get("interrog_night_finished") and u1 is not None and u2 is not None:
         try:
             lines.append(
-                "⚖️ بازپرس: "
+                f"⚖️ {lab_interrog}: "
                 f"{tag_for_uid(int(u1))} و {tag_for_uid(int(u2))}"
             )
         except (TypeError, ValueError):
@@ -3808,7 +4276,13 @@ def _mason_day_ability_elim_keys(
 
 def _build_bazpors_timeline_html(snap: dict[str, object]) -> str:
     scenario = str(snap.get("scenario_name") or "")
-    if scenario not in ("bazpors", "bazpors_salamat_test", "mozakere", "masoon"):
+    is_nam10_fork = (
+        scenario == "namayande" and snap.get("nmnd_host_mode") == "no_host"
+    )
+    if (
+        scenario not in ("bazpors", "bazpors_salamat_test", "mozakere", "masoon")
+        and not is_nam10_fork
+    ):
         return ""
     rows_raw = snap.get("rows")
     rows: list[dict[str, object]] = rows_raw if isinstance(rows_raw, list) else []
@@ -3856,6 +4330,11 @@ def _build_bazpors_timeline_html(snap: dict[str, object]) -> str:
             bucket.append(line)
 
     records = _load_audit_records_for_recap(snap)
+    pseudo_raw = snap.get("_pseudo_records")
+    if isinstance(pseudo_raw, list):
+        records = list(records) + [
+            rec for rec in pseudo_raw if isinstance(rec, dict)
+        ]
     mason_day_elims = (
         _mason_day_ability_elim_keys(records) if scenario == "masoon" else set()
     )
@@ -3886,9 +4365,87 @@ def _build_bazpors_timeline_html(snap: dict[str, object]) -> str:
         except (KeyError, ValueError, TypeError):
             continue
 
+    # Namayande-10 daytime rebel assassination: build uid -> day maps.
+    # Preferred source: the day-scoped audit event (new games). Fallback:
+    # correlate the effect record with the last day-start before it
+    # (older games, e.g. Room 93, only carry night-stamped records).
+    assass_day_by_uid: dict[int, int] = {}
+    assass_effect_day: dict[int, int] = {}
+    if is_nam10_fork:
+        day_starts: list[tuple[str, int]] = []
+        for _rec in records:
+            if str(_rec.get("event") or "") != "no_host.day_started_after_night":
+                continue
+            try:
+                day_starts.append(
+                    (str(_rec.get("ts") or ""), int(_rec.get("host_day") or 0))
+                )
+            except (ValueError, TypeError):
+                continue
+        day_starts.sort()
+
+        def _assass_day_from_ts(ts: str) -> int:
+            best = 0
+            for _t, _d in day_starts:
+                if _t and ts and _t <= ts and _d > best:
+                    best = _d
+            return best
+
+        for _rec in records:
+            _ev = str(_rec.get("event") or "")
+            if _ev == "night2.rebel_assassination_day_elim":
+                try:
+                    _d = int(_rec.get("host_day") or 0)
+                    _rebel = int(_rec.get("rebel_uid") or 0)
+                    _tgt = int(_rec.get("target_uid") or 0)
+                except (ValueError, TypeError):
+                    continue
+                if _d <= 0:
+                    continue
+                assass_day_by_uid[_rebel] = _d
+                if _rec.get("target_eliminated"):
+                    assass_day_by_uid[_tgt] = _d
+            elif _ev == "night2.rebel_assassination_effect":
+                _d = _assass_day_from_ts(str(_rec.get("ts") or ""))
+                if _d <= 0:
+                    continue
+                try:
+                    _rebel = int(_rec.get("rebel_uid") or 0)
+                    _tgt = int(_rec.get("target_uid") or 0)
+                except (ValueError, TypeError):
+                    continue
+                assass_effect_day[_rebel] = _d
+                if _rec.get("target_eliminated"):
+                    assass_effect_day[_tgt] = _d
+
     for rec in records:
         event = str(rec.get("event") or "")
         if event == "no_host.day_started_after_night":
+            continue
+        if event == "night2.elimination" and is_nam10_fork:
+            # Namayande-10 daytime rebel assassination eliminations are
+            # recorded under the ACTUAL day; night eliminations keep
+            # rendering through the published night report only.
+            _cause = str(rec.get("cause") or "")
+            if _cause in ("rebel_assassination", "rebel_assassination_self"):
+                try:
+                    _a_uid = int(rec["uid"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                _day_no = (
+                    int(rec.get("host_day") or 0)
+                    or assass_day_by_uid.get(_a_uid, 0)
+                    or assass_effect_day.get(_a_uid, 0)
+                )
+                if _day_no <= 0:
+                    continue
+                _who = tag_for_uid(_a_uid)
+                _line = (
+                    f"🎯 {_who} با اجرای ترور از بازی خارج شد."
+                    if _cause == "rebel_assassination_self"
+                    else f"🩸 {_who} بر اثر ترور از بازی خارج شد."
+                )
+                append_day_elim(_day_no, _a_uid, _line, kind="assass")
             continue
         if event == "no_host.mozakere_negotiation_committed":
             try:
@@ -4095,6 +4652,7 @@ def _build_bazpors_timeline_html(snap: dict[str, object]) -> str:
                         tag_for_uid,
                         records=records,
                         night_no=end_night,
+                        nam10=is_nam10_fork,
                     )
                 if end_lines:
                     night_events[end_night] = end_lines
@@ -4216,11 +4774,27 @@ def _build_bazpors_timeline_html(snap: dict[str, object]) -> str:
         if night_ev:
             lines.append(f"🌙 <b>شب {_fa_digits(day)}</b>")
             lines.extend(night_ev)
+        elif is_nam10_fork and day == max_day and end_game_day == max_day:
+            # The game ended during this day, so this night never
+            # happened: never fabricate a "بدون اتفاق" night block.
+            # Mid-game cutoff reports (no game.ended record) keep the
+            # legacy placeholder.
+            pass
         else:
             lines.append(f"🌙 <b>شب {_fa_digits(day)}</b> - {_no_events}")
         if day != max_day:
             lines.append("")
-    return "\n".join(lines)
+    joined = "\n".join(lines)
+    if is_nam10_fork:
+        # Namayande-only display change: suffix every player name in
+        # the event history with the original role — used by BOTH the
+        # live eliminated-player report and the final post-game reports.
+        from bot.nam10.role_labels import (
+            nam10_tag_event_history_names_with_roles,
+        )
+
+        joined = nam10_tag_event_history_names_with_roles(joined, rows)
+    return joined
 
 
 def build_session_recap_html(session_id: int, snap: dict[str, object]) -> str:
@@ -4278,6 +4852,7 @@ def build_session_recap_html(session_id: int, snap: dict[str, object]) -> str:
             rows,
             medal_by_uid=_recap_medal_emoji_by_uid(medals_map),
             scenario_name=scenario_name,
+            nam10=_snap_is_nam10_fork(snap),
         )
     )
 
@@ -4341,7 +4916,9 @@ def build_bazpors_game_end_broadcast_html(game: Game, winner: str) -> str:
     rows: list[dict[str, object]] = rows_raw if isinstance(rows_raw, list) else []
     scenario_name = str(snap.get("scenario_name") or game.scenario_name or "bazpors")
     roster_block = "\n".join(
-        _build_session_recap_roster_lines(rows, scenario_name=scenario_name)
+        _build_session_recap_roster_lines(
+            rows, scenario_name=scenario_name, nam10=_snap_is_nam10_fork(snap)
+        )
     )
     timeline_html = _build_bazpors_timeline_html(snap)
     parts: list[str] = []
@@ -4410,7 +4987,11 @@ def host_deal_roles_keyboard(game: Game) -> InlineKeyboardMarkup:
             ),
         ]
     ]
-    if game.scenario_name in ("bazpors", "mozakere", "masoon", "russian_mafia"):
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if game.scenario_name in ("bazpors", "mozakere", "masoon", "russian_mafia") or (
+        game.scenario_name == "namayande" and is_namayande10_no_host_room(game)
+    ):
         rows.append(
             [
                 InlineKeyboardButton(
@@ -5534,6 +6115,30 @@ async def main() -> None:
             clear_mason_night_reminder_state(g)
     except Exception:
         logger.exception("mason night reminder restore invalidate failed")
+    try:
+        from bot.night_helper_reminder import (
+            clear_night_helper_reminder_state,
+            invalidate_night_helper_reminders_on_restore,
+            night_reminder_collect_active,
+        )
+
+        invalidate_night_helper_reminders_on_restore()
+        for code in restored:
+            g = manager.get_game(code)
+            if g is None:
+                continue
+            g.night_helper_reminder_generation = (
+                int(g.night_helper_reminder_generation or 0) + 1
+            )
+            if not night_reminder_collect_active(g):
+                clear_night_helper_reminder_state(g)
+            # During an active collection the Telegram message is still
+            # live in the helper chat: keep chat_id/message_id/last_count
+            # so refresh/cleanup keep operating on the SAME message after
+            # restart. recover_night_helper_reminders_after_restart
+            # re-creates the pending timer if a send had not happened yet.
+    except Exception:
+        logger.exception("night helper reminder restore invalidate failed")
     if restored:
         logger.info(
             "Restored %d active game(s) from snapshot: %s",
@@ -5554,6 +6159,51 @@ async def main() -> None:
                 logger.exception(
                     "Russian panel reissue failed room=%s", code
                 )
+        from bot.nam10.day1_betrayal import (
+            nam10_resume_restored_day1_betrayal_rooms,
+        )
+
+        try:
+            resumed_day1 = await nam10_resume_restored_day1_betrayal_rooms(
+                bot, list(restored)
+            )
+            if resumed_day1:
+                logger.info(
+                    "Namayande-10 day1 betrayal collection resumed: %s",
+                    ", ".join(resumed_day1),
+                )
+        except Exception:
+            logger.exception("Namayande-10 day1 betrayal resume failed")
+
+        from bot.nam10.night2_publish import (
+            nam10_night2_publish_tick,
+        )
+
+        for code in list(restored):
+            restored_game = manager.get_game(code)
+            if restored_game is None:
+                continue
+            try:
+                await nam10_night2_publish_tick(
+                    bot, restored_game, manager
+                )
+            except Exception:
+                logger.exception(
+                    "Namayande-10 night2 publication reissue failed"
+                    " room=%s",
+                    code,
+                )
+
+        try:
+            from bot.night_helper_reminder import (
+                recover_night_helper_reminders_after_restart,
+            )
+
+            await recover_night_helper_reminders_after_restart(bot)
+        except Exception:
+            logger.exception(
+                "night helper reminder post-restart recovery failed"
+            )
     await bot.set_my_commands(
         build_bot_menu_commands(),
         scope=BotCommandScopeAllPrivateChats(),

@@ -44,6 +44,11 @@ from bot.observer_delivery import (
     update_mirror_prompt_pair,
 )
 from bot.room_mode import is_mason_scenario, is_mozakere_scenario
+from bot.no_host_role_pick_common import (
+    apply_bazpors_panel_styles,
+    mozakere_confirm_label,
+    with_inline_confirm_row,
+)
 if TYPE_CHECKING:
     from bot.game import GameManager
 
@@ -319,7 +324,11 @@ def _mozakere_mafia_menu_keyboard(
                 )
             ]
         )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(inline_keyboard=rows),
+        ok_acts={"nms", "nmg"},
+    )
 
 
 def _mafia_menu_keyboard(game: Game, mafia_uid: int, gm: "GameManager") -> InlineKeyboardMarkup:
@@ -343,29 +352,46 @@ def _mafia_menu_keyboard(game: Game, mafia_uid: int, gm: "GameManager") -> Inlin
                 )
             ]
         )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    # بازپرس — انتخاب فعلی به‌صورت قرمز (кладهٔ موقتی) و بقیه آبی.
+    selected_act = act_map.get(game.no_host_mafia_night1_pending_action)
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    if game.scenario_name == "bazpors":
+        kb = apply_bazpors_panel_styles(
+            game,
+            kb,
+            ok_acts={"nms", "nmy", "nmn"},
+            selected_acts=(selected_act,) if selected_act else (),
+        )
+        # تأیید سبز از رندر اولیه — عملیات فقط با تأیید نهایی ثبت می‌شود.
+        kb = with_inline_confirm_row(game, mafia_uid, kb, confirm_act="nmc")
+        return kb
+    return apply_bazpors_panel_styles(game, kb, ok_acts={"nms", "nmy", "nmn"})
 
 
 def _mafia_confirm_keyboard(game: Game, mafia_uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ تأیید",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="nmc", as_uid=mafia_uid
-                    ).pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="↩️ انصراف و بازگشت به مرحله قبل",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="nmb", as_uid=mafia_uid
-                    ).pack(),
-                )
-            ],
-        ]
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=mozakere_confirm_label(game),
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act="nmc", as_uid=mafia_uid
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="↩️ انصراف و بازگشت به مرحله قبل",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act="nmb", as_uid=mafia_uid
+                        ).pack(),
+                    )
+                ],
+            ]
+        ),
+        ok_acts={"nmc", "nmb"},
     )
 
 
@@ -546,6 +572,16 @@ async def _finalize_mozakere_negotiate_action(
 
     mark_mozakere_negotiation_tonight(game)
     game.no_host_mafia_shot_done = True
+
+    # Room 44 fix: the moment the negotiation is announced, suspend
+    # the live doctor/detective/sniper pick panels (edit in place,
+    # keyboards removed; pick state is preserved — voiding stays at
+    # commit).
+    from bot.no_host_mozakere_negotiation_reset import (
+        suspend_mozakere_town_panels_for_negotiation,
+    )
+
+    await suspend_mozakere_town_panels_for_negotiation(bot, game)
 
     await _edit_mafia_prompt(
         bot,
@@ -776,6 +812,13 @@ async def _finalize_mafia_night1(
 
         mark_mozakere_negotiation_tonight(game)
         game.no_host_mafia_shot_done = True
+        # Room 44 fix: suspend town pick panels at announcement
+        # (edit in place; voiding stays at commit).
+        from bot.no_host_mozakere_negotiation_reset import (
+            suspend_mozakere_town_panels_for_negotiation,
+        )
+
+        await suspend_mozakere_town_panels_for_negotiation(bot, game)
         await _edit_mafia_prompt(
             bot,
             game,
@@ -867,22 +910,6 @@ async def dispatch_no_host_mafia_night1(
     act_map = {"nms": MAFIA_ACTION_SHOT, "nmy": MAFIA_ACTION_YAKU, "nmn": MAFIA_ACTION_NATO, "nmg": MAFIA_ACTION_NEGOTIATE}
     if act in act_map:
         action = act_map[act]
-        if is_mozakere_scenario(game) and act in ("nms", "nmg"):
-            allowed = _available_mafia_actions(game, gm)
-            if action not in allowed:
-                await callback.answer("این عملیات الان مجاز نیست.", show_alert=True)
-                return
-            if act == "nms":
-                await callback.answer("شات انتخاب شد.")
-                await _start_mozakere_direct_shot(
-                    bot, game, gm, mafia_uid=mafia_uid, actor_uid=actor_uid
-                )
-                return
-            await callback.answer("مذاکره انتخاب شد.")
-            await _finalize_mozakere_negotiate_action(
-                bot, game, gm, mafia_uid=mafia_uid, actor_uid=actor_uid
-            )
-            return
         if action == MAFIA_ACTION_YAKU:
             if not _yaku_option_visible(game, gm):
                 await callback.answer("یاکوزایی مقدور نمی‌باشد.", show_alert=True)
@@ -926,6 +953,13 @@ async def dispatch_no_host_mafia_night1(
                 await callback.answer("این عملیات الان مجاز نیست.", show_alert=True)
                 return
         game.no_host_mafia_night1_pending_action = action
+        if game.scenario_name == "bazpors":
+            # بازپرس — پنل منو با عملیات انتخابی قرمز + تأیید سبز در همان صفحه.
+            await callback.answer("انتخاب شد؛ تأیید کنید.")
+            menu_text = build_no_host_mafia_night1_menu_html(game)
+            menu_kb = _mafia_menu_keyboard(game, mafia_uid, gm)
+            await _edit_mafia_prompt(bot, game, mafia_uid, menu_text, menu_kb)
+            return
         await callback.answer("تأیید کنید.")
         confirm_text = build_no_host_mafia_night1_confirm_html(game, action)
         confirm_kb = _mafia_confirm_keyboard(game, mafia_uid)

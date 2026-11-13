@@ -87,6 +87,23 @@ async def dispatch_all_no_host_night_entry_panels(
 
     arm_all_pending_no_host_role_pick_flows(game)
 
+    # یادآور عمومی شب کمک‌کننده (ماسون ماژول مستقل خودش را دارد).
+    try:
+        from bot.night_helper_reminder import schedule_night_helper_reminder
+
+        schedule_night_helper_reminder(bot, game)
+    except Exception:
+        try:
+            from bot.game_audit_log import log_event
+
+            log_event(
+                game,
+                "night_helper_reminder.schedule_error",
+                night_count=nc,
+            )
+        except Exception:
+            pass
+
     try:
         from bot.game_audit_log import log_event
 

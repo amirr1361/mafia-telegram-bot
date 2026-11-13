@@ -299,6 +299,23 @@ async def handle_bazpors_elim_report_callback(
         )
         return
 
+    # گزارش زنده: در هر درخواست، گزارش تجمعی از روی تاریخچهٔ قطعیِ
+    # فعلی بازسازی می‌شود؛ اسنپ‌شاتِ ثبت‌شده فقط عقب‌نشینی ایمن است.
+    from bot.app_state import manager as _live_manager
+
+    try:
+        _fresh_html = build_bazpors_elim_cutoff_report_html(game, _live_manager)
+    except Exception:
+        logger.exception(
+            "bazpors live report rebuild failed room=%s", game.room_code
+        )
+        _fresh_html = None
+    if _fresh_html and _fresh_html.strip():
+        report_html = _fresh_html
+        _entry = game.bazpors_elim_report_cutoffs.get(as_uid)
+        if isinstance(_entry, dict):
+            _entry["report_html"] = _fresh_html
+
     await safe_callback_answer(callback)
     await deliver_bazpors_elim_report_chunks(bot, actor, report_html)
 
@@ -314,6 +331,15 @@ async def cb_bazpors_elim_report(
     if not callback.from_user:
         return
     game = manager.get_game(callback_data.code)
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if game is not None and is_namayande10_no_host_room(game):
+        from bot.nam10.no_host_elim_report import (
+            cb_nam10_elim_report as _nam10_elim_cb,
+        )
+
+        await _nam10_elim_cb(callback, bot, callback_data)
+        return
     if game is None or not is_bazpors_elim_report_scenario(game):
         await safe_callback_answer(
             callback, "اتاق دیگر فعال نیست.", show_alert=True

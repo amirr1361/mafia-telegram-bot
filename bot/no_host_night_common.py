@@ -108,7 +108,7 @@ def no_host_night_wait_ok_keyboard(game: Game, uid: int) -> InlineKeyboardMarkup
 
 def no_host_role_ack_keyboard(game: Game, uid: int, act: str) -> InlineKeyboardMarkup:
     """دکمهٔ اوکی با act اختصاصی نقش (cic، ruc، …) تا همان handler پنل را ببندد."""
-    return InlineKeyboardMarkup(
+    kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
@@ -120,10 +120,15 @@ def no_host_role_ack_keyboard(game: Game, uid: int, act: str) -> InlineKeyboardM
             ]
         ]
     )
+    if game.scenario_name == "bazpors":
+        for row in kb.inline_keyboard:
+            for btn in row:
+                btn.style = "primary"
+    return kb
 
 
 def no_host_simple_ok_keyboard(game: Game, uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+    kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
@@ -135,6 +140,11 @@ def no_host_simple_ok_keyboard(game: Game, uid: int) -> InlineKeyboardMarkup:
             ]
         ]
     )
+    if game.scenario_name == "bazpors":
+        for row in kb.inline_keyboard:
+            for btn in row:
+                btn.style = "primary"
+    return kb
 
 
 def format_night_selection_label(

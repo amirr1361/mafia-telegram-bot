@@ -34,12 +34,15 @@ from bot.models import Game, Player
 from bot.room_mode import is_mozakere_scenario, is_no_host_player_room
 from bot.no_host_role_pick_common import (
     actor_may_act_on_role_panel,
+    append_pending_selection_line,
     build_confirm_cancel_keyboard,
     build_pick_keyboard,
     player_button_name,
     sync_role_mirror_panel,
     target_in_pool,
+    with_inline_confirm_row,
 )
+from bot.roles.night_state import sniper_night_state
 from bot.roles.registry import find_alive_role_holder, require_role_module
 from bot.observer_delivery import (
     deliver_no_host_player_game_copy,
@@ -55,12 +58,19 @@ if TYPE_CHECKING:
     from bot.game import GameManager
 
 
+def _inline_confirm_scenario(game: Game) -> bool:
+    """تأیید درون‌صفحه‌ای: مذاکره + بازپرس (طراحی یکپارچهٔ پنل انتخاب)."""
+    return is_mozakere_scenario(game) or game.scenario_name == "bazpors"
+
+
 def _sniper_ui_key(game: Game, sn_uid: int) -> str:
     return mirror_ui_claim_key(game.room_code, "no_host_sniper", sn_uid)
 
 
-def _player_button_name(p: Player | None, uid: int) -> str:
-    return player_button_name(p, uid)
+def _player_button_name(
+    p: Player | None, uid: int, display_name: str | None = None
+) -> str:
+    return player_button_name(p, uid, display_name)
 
 
 def _sniper_shot_pool(game: Game) -> list[Player]:
@@ -98,7 +108,9 @@ def build_no_host_sniper_confirm_html(
         targets = "⭕ <b>انتخابی ندارم</b>"
     else:
         p = game.players.get(target_uid)
-        targets = html.escape(_player_button_name(p, target_uid))
+        targets = html.escape(
+        _player_button_name(p, target_uid, gm.user_display_names.get(target_uid))
+    )
     return (
         f"{build_no_host_sniper_pick_html(game)}\n\n"
         f"🔫 هدف: <b>{targets}</b>\n\n"
@@ -115,7 +127,9 @@ def build_no_host_sniper_waiting_html(
         body = "شما این شب شلیک نکردید."
     else:
         p = game.players.get(target_uid)
-        name = html.escape(_player_button_name(p, target_uid))
+        name = html.escape(
+        _player_button_name(p, target_uid, gm.user_display_names.get(target_uid))
+    )
         body = f"شلیک به <b>{name}</b> ثبت شد."
     return (
         f"🎯 {night_lbl} - ثبت انتخاب اسنایپر\n\n"
@@ -181,15 +195,36 @@ def build_no_host_sniper_result_html(game: Game, gm: "GameManager") -> str | Non
 def _pick_keyboard(
     game: Game, sn_uid: int, gm: "GameManager"
 ) -> InlineKeyboardMarkup:
-    del gm
-    return build_pick_keyboard(
+    pending = game.no_host_sniper_pending_target_uid
+    if pending is not None:
+        selected: list[int] = [pending]
+    else:
+        committed = sniper_night_state(game).night_target_uid
+        selected = [committed] if committed is not None else []
+    kb = build_pick_keyboard(
         game,
         sn_uid,
         pick_act="skt",
         players=_sniper_shot_pool(game),
         none_act="skn",
         none_text="⭕ انتخابی ندارم",
+        selected_uids=selected,
+        none_selected=game.no_host_sniper_pending_none,
+        display_names=gm.user_display_names,
     )
+    if _inline_confirm_scenario(game):
+        kb = with_inline_confirm_row(game, sn_uid, kb, confirm_act="skc")
+    return kb
+
+
+def _mozakere_sniper_pending_line(game: Game, gm: "GameManager") -> str:
+    if game.no_host_sniper_pending_none:
+        return "⭕ انتخاب فعلی: <b>انتخابی ندارم</b>"
+    tid = game.no_host_sniper_pending_target_uid
+    if tid is not None:
+        tag = html.escape(gm.format_player_tag(game.players.get(tid))[:40])
+        return f"🔫 انتخاب فعلی: <b>{tag}</b>"
+    return "🔫 انتخاب فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
 
 
 def _confirm_keyboard(game: Game, sn_uid: int) -> InlineKeyboardMarkup:
@@ -280,6 +315,7 @@ async def start_no_host_sniper_night_flow(
 
     game.no_host_sniper_flow_active = True
     game.no_host_sniper_pending_target_uid = None
+    game.no_host_sniper_pending_none = False
     game.no_host_sniper_dm_signature = sig
 
     text = build_no_host_sniper_pick_html(game)
@@ -435,6 +471,19 @@ async def dispatch_no_host_sniper_night(
     act: str,
     tid: int,
 ) -> None:
+    from bot.no_host_mozakere_negotiation_reset import (
+        MOZAKERE_NEGOTIATION_PENDING_ALERT,
+        mozakere_negotiation_pending,
+    )
+
+    if mozakere_negotiation_pending(game):
+        # Room 44: no town action may be recorded while the mafia
+        # negotiation is pending. Runs BEFORE any state mutation or
+        # flow re-arming and holds even if Telegram cleanup failed.
+        await callback.answer(
+            MOZAKERE_NEGOTIATION_PENDING_ALERT, show_alert=True
+        )
+        return
     arm_no_host_role_pick_flow(
         game,
         flow_active_attr="no_host_sniper_flow_active",
@@ -463,14 +512,51 @@ async def dispatch_no_host_sniper_night(
         if not target_in_pool(tid, pool):
             await callback.answer("این بازیکن در لیست نیست.", show_alert=True)
             return
+        if (
+            _inline_confirm_scenario(game)
+            and game.no_host_sniper_pending_target_uid == tid
+        ):
+            # زدن دوباره روی انتخاب فعلی = لغو انتخاب (بازگشت به لیست).
+            game.no_host_sniper_pending_target_uid = None
+            game.no_host_sniper_pending_none = False
+            await callback.answer("انتخاب لغو شد.")
+            text = build_no_host_sniper_pick_html(game)
+            kb = _pick_keyboard(game, sn_uid, gm)
+            await _sync_panel(bot, game, sn_uid, text, kb)
+            return
         game.no_host_sniper_pending_target_uid = tid
+        game.no_host_sniper_pending_none = False
         await callback.answer("انتخاب شد؛ تأیید کنید.")
+        if _inline_confirm_scenario(game):
+            # مذاکره/بازپرس — پنل انتخاب با انتخاب قرمز + تأیید سبز در همان صفحه.
+            text = append_pending_selection_line(
+                build_no_host_sniper_pick_html(game),
+                [_mozakere_sniper_pending_line(game, gm)],
+            )
+            kb = _pick_keyboard(game, sn_uid, gm)
+            await _sync_panel(bot, game, sn_uid, text, kb)
+            return
         text = build_no_host_sniper_confirm_html(game, gm, tid)
         kb = _confirm_keyboard(game, sn_uid)
         await _sync_panel(bot, game, sn_uid, text, kb)
         return
 
     if act == "skn":
+        if _inline_confirm_scenario(game):
+            if game.no_host_sniper_pending_none:
+                game.no_host_sniper_pending_none = False
+                await callback.answer("انتخابی ندارم — لغو شد.")
+            else:
+                game.no_host_sniper_pending_none = True
+                game.no_host_sniper_pending_target_uid = None
+                await callback.answer("انتخابی ندارم؛ تأیید کنید.")
+            text = append_pending_selection_line(
+                build_no_host_sniper_pick_html(game),
+                [_mozakere_sniper_pending_line(game, gm)],
+            )
+            kb = _pick_keyboard(game, sn_uid, gm)
+            await _sync_panel(bot, game, sn_uid, text, kb)
+            return
         game.no_host_sniper_pending_target_uid = None
         await callback.answer("انتخابی ندارم؛ تأیید کنید.")
         text = build_no_host_sniper_confirm_html(game, gm, None)
@@ -480,6 +566,7 @@ async def dispatch_no_host_sniper_night(
 
     if act == "skb":
         game.no_host_sniper_pending_target_uid = None
+        game.no_host_sniper_pending_none = False
         await callback.answer("بازگشت به لیست.")
         text = build_no_host_sniper_pick_html(game)
         kb = _pick_keyboard(game, sn_uid, gm)
@@ -488,6 +575,13 @@ async def dispatch_no_host_sniper_night(
 
     if act == "skc":
         pick = game.no_host_sniper_pending_target_uid
+        none_pending = bool(game.no_host_sniper_pending_none)
+        if _inline_confirm_scenario(game) and pick is None and not none_pending:
+            await callback.answer(
+                "ابتدا یک بازیکن انتخاب کنید یا «انتخابی ندارم» را بزنید.",
+                show_alert=True,
+            )
+            return
         if pick is not None and not target_in_pool(pick, pool):
             await callback.answer("انتخاب نامعتبر.", show_alert=True)
             return
@@ -497,6 +591,7 @@ async def dispatch_no_host_sniper_night(
         _commit_sniper_pick(game, pick)
         game.no_host_sniper_pick_confirmed = True
         game.no_host_sniper_flow_active = False
+        game.no_host_sniper_pending_none = False
 
         await callback.answer("ثبت شد.")
         await publish_no_host_night_wait_panel(

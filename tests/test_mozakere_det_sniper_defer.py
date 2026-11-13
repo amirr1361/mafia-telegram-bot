@@ -193,7 +193,7 @@ class MozakereNoBeginNightActionsPromptTests(unittest.TestCase):
         self.assertNotIn("همه بازیکنان را بخوابان", text)
         self.assertIsNone(kb)
 
-    def test_bazpors_night_start_still_has_begin_night_actions_when_needed(self) -> None:
+    def test_bazpors_night_start_panel_suppressed_like_mozakere(self) -> None:
         from bot.bazpors_narrator import build_host_message_and_keyboard
 
         game = self.gm.create_game(
@@ -208,9 +208,11 @@ class MozakereNoBeginNightActionsPromptTests(unittest.TestCase):
         game.no_host_assistant_narrator_active = True
         game.no_host_night1_hunter_done = True
         game.no_host_mafia_night1_done = True
+        # بازپرس مانند مذاکره: پنل «شب … آغاز شد»/شروع اجرای نقش‌های شب
+        # برای کمک‌کننده ارسال نمی‌شود؛ پایان شب خودکار است و دکمهٔ
+        # «اتمام شب» روی یادآور ۱۲۰ثانیه‌ای قرار دارد.
         text, kb = build_host_message_and_keyboard(game, self.gm)
-        self.assertIn("شروع اجرای نقش‌های شب", text)
-        self.assertIsNotNone(kb)
+        self.assertEqual((text, kb), ("", None))
 
 
 class MozakereMafiaShotFinalizeNoLegacyPromptTests(unittest.IsolatedAsyncioTestCase):

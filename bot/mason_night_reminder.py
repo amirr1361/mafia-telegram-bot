@@ -12,7 +12,6 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from bot.game import is_synthetic_player_uid, synthetic_player_base_name
 from bot.models import Game, Phase, Player, Role
 from bot.room_mode import is_mason_scenario
-from bot.text_fa import fa_digits
 from bot.tg_send import safe_send_message_return
 
 if TYPE_CHECKING:
@@ -20,12 +19,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-REMINDER_DELAY_SEC = 60.0
+REMINDER_DELAY_SEC = 120.0
 
-_REMINDER_HEADER = "بازیکن‌های زیر هنوز اکت خودشان را انجام نداده‌اند:\n\n"
-_REMINDER_FOOTER = (
-    "\n\nبه بازیکن‌های بالا گوشزد کنید که تا زمانی که اکت خودشان را انجام ندهند، "
-    "ربات پایان شب را اعلام نمی‌کند."
+# پنل شمارندهٔ زندهٔ ماسون — عمومی، بدون نام بازیکن/نقش/صندلی (متن ماسون
+# بدون هشدارهای سرباز/اسنایپر است؛ آن‌ها فقط ویژهٔ نماینده ۱۲/۱۳ هستند).
+_MASON_REMINDER_HEADER = "🌙 قابلیت اتمام شب"
+_MASON_REMINDER_COUNT_LINE = (
+    "به دلیل اینکه هنوز {count} اقدام شبانه تکمیل نشده است، "
+    "فاز شب همچنان ادامه دارد."
+)
+_MASON_REMINDER_ASK_LINE = (
+    "لطفاً از بازیکنان بخواهید اقدامات شبانه خود را تکمیل و تأیید کنند."
+)
+_MASON_REMINDER_BUTTON_LINE = (
+    "در صورت نیاز، می‌توانید با انتخاب گزینه «اتمام شب»، "
+    "شب جاری را به پایان برسانید."
+)
+_MASON_REMINDER_TAIL_LINE = (
+    "در این حالت، اقدامات تأییدشده محاسبه می‌شوند و اقدامات ناتمام "
+    "مطابق قوانین سناریو تعیین تکلیف خواهند شد."
 )
 _DONE_MARK = " (انجام داد)"
 
@@ -55,7 +67,9 @@ def clear_mason_night_reminder_state(game: Game) -> None:
 
 
 def mason_reminder_display_name(player: Player) -> str:
-    name = (player.full_name or "").strip()
+    from bot.app_state import custom_display_name
+
+    name = (custom_display_name(player.user_id) or (player.full_name or "")).strip()
     if not name:
         return str(player.user_id)
     if is_synthetic_player_uid(player.user_id):
@@ -102,22 +116,47 @@ def collect_mason_night_pending_holder_uids(
     return pending
 
 
-def build_mason_night_reminder_text(
-    game: Game,
-    initial_uids: list[int],
-    *,
-    pending_uids: set[int],
-) -> str:
-    lines: list[str] = []
-    for idx, uid in enumerate(initial_uids, start=1):
-        player = game.players.get(uid)
-        if player is None:
-            name = str(uid)
-        else:
-            name = mason_reminder_display_name(player)
-        mark = _DONE_MARK if uid not in pending_uids else ""
-        lines.append(f"{fa_digits(idx)}- {name}{mark}")
-    return _REMINDER_HEADER + "\n".join(lines) + _REMINDER_FOOTER
+def collect_mason_night_outstanding_count(game: Game, gm: "GameManager") -> int:
+    """شمارندهٔ authoritative اقدامات ناتمام — الزامات، نه نفرات یکتا.
+
+    هر الزامِ required و انجام‌نشده یک واحد شمرده می‌شود (بازیکنی با دو
+    اقدام الزامی، دو واحد شمرده می‌شود). موارد بی‌دارنده/مرده و
+    مسئولیت‌های ناظر (خارج از پنل یادآور) شمرده نمی‌شوند — همان فیلترهای
+    برچسب‌گذاری قدیمی."""
+    if not is_mason_scenario(game):
+        return 0
+    from bot.mason_responsibilities import collect_mason_night_responsibilities
+
+    count = 0
+    for resp in collect_mason_night_responsibilities(game, gm):
+        if not resp.required or resp.done:
+            continue
+        uid = resp.holder_uid
+        player = game.players.get(uid) if uid is not None else None
+        if player is None or not player.is_alive:
+            continue
+        if player.role == Role.OBSERVER:
+            continue
+        count += 1
+    return count
+
+
+def build_mason_night_reminder_text(game: Game, count: int) -> str:
+    """متن عمومی یادآور با شمارندهٔ زنده — هیچ نام یا نقشی نمایش داده نمی‌شود."""
+    from bot.text_fa import fa_digits
+
+    del game
+    body = "\n\n".join(
+        (
+            _MASON_REMINDER_COUNT_LINE.format(
+                count=fa_digits(max(0, count))
+            ),
+            _MASON_REMINDER_ASK_LINE,
+            _MASON_REMINDER_BUTTON_LINE,
+            _MASON_REMINDER_TAIL_LINE,
+        )
+    )
+    return f"{_MASON_REMINDER_HEADER}\n\n{body}"
 
 
 def _reminder_still_valid(
@@ -183,7 +222,7 @@ async def cleanup_mason_night_helper_reminder(
 async def refresh_mason_night_helper_reminder(
     bot: Bot, game: Game, gm: "GameManager"
 ) -> None:
-    """پس از تأیید اکت — ویرایش/حذف یادآور (event-driven)."""
+    """به‌روزرسانی زندهٔ شمارنده روی همان پیام — بدون پیام جدید و بدون تایمر جدید."""
     if not is_mason_scenario(game):
         return
     if game.mason_night_reminder_message_id is None:
@@ -202,53 +241,36 @@ async def refresh_mason_night_helper_reminder(
             ):
                 await _delete_reminder_message(bot, game)
                 return
-
-            initial = list(game.mason_night_reminder_initial_pending_uids)
-            if not initial:
+            count = collect_mason_night_outstanding_count(game, gm)
+            if count <= 0:
                 await _delete_reminder_message(bot, game)
                 return
-
-            pending = set(collect_mason_night_pending_holder_uids(game, gm))
-            if not any(uid in pending for uid in initial):
-                await _delete_reminder_message(bot, game)
+            text = build_mason_night_reminder_text(game, count)
+            if game.mason_night_reminder_last_text == text:
                 return
-
-            text = build_mason_night_reminder_text(
-                game, initial, pending_uids=pending
+            chat_id = (
+                game.mason_night_reminder_chat_id
+                or game.bot_assistant_user_id
             )
-            if text == game.mason_night_reminder_last_text:
-                return
-            chat_id = game.mason_night_reminder_chat_id
             message_id = game.mason_night_reminder_message_id
             if chat_id is None or message_id is None:
                 return
             try:
+                from bot.mason_force_finish_night import (
+                    mason_force_finish_button_keyboard,
+                )
+
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
                     text=text,
+                    reply_markup=mason_force_finish_button_keyboard(game),
                 )
                 game.mason_night_reminder_last_text = text
-            except TelegramBadRequest as exc:
-                # پیام حذف‌شده یا بدون تغییر
-                msg = str(exc).lower()
-                if "message is not modified" in msg:
-                    game.mason_night_reminder_last_text = text
-                    return
-                if "message to edit not found" in msg or "message can't be edited" in msg:
-                    clear_mason_night_reminder_state(game)
-                    return
-                logger.info(
-                    "mason night reminder edit ignored room=%s err=%s",
-                    game.room_code,
-                    exc,
-                )
-            except TelegramForbiddenError:
-                clear_mason_night_reminder_state(game)
-            except Exception:
-                logger.exception(
-                    "mason night reminder edit failed room=%s", game.room_code
-                )
+            except TelegramBadRequest:
+                # message not modified / too old — the counter stays
+                # authoritative for the next refresh tick.
+                game.mason_night_reminder_last_text = text
         except Exception:
             logger.exception(
                 "mason night reminder refresh failed room=%s", game.room_code
@@ -284,19 +306,24 @@ async def _send_reminder_if_needed(
         if assistant_uid is None:
             return
 
-        pending = collect_mason_night_pending_holder_uids(game, gm)
-        if not pending:
+        count = collect_mason_night_outstanding_count(game, gm)
+        if count <= 0:
             return
 
-        text = build_mason_night_reminder_text(
-            game, pending, pending_uids=set(pending)
+        text = build_mason_night_reminder_text(game, count)
+        from bot.mason_force_finish_night import mason_force_finish_button_keyboard
+
+        msg = await safe_send_message_return(
+            bot,
+            assistant_uid,
+            text,
+            reply_markup=mason_force_finish_button_keyboard(game),
         )
-        msg = await safe_send_message_return(bot, assistant_uid, text)
         if msg is None:
             return
         game.mason_night_reminder_chat_id = assistant_uid
         game.mason_night_reminder_message_id = msg.message_id
-        game.mason_night_reminder_initial_pending_uids = list(pending)
+        game.mason_night_reminder_initial_pending_uids = []
         game.mason_night_reminder_night_count = night_count
         game.mason_night_reminder_last_text = text
         game.mason_night_reminder_created_at_iso = created_at_iso
@@ -350,7 +377,7 @@ def schedule_mason_night_helper_reminder(
     *,
     delay_sec: float = REMINDER_DELAY_SEC,
 ) -> None:
-    """پس از اتمام ارسال پنل‌های شب — تایمر ۶۰ثانیه‌ای برای کمک‌کننده."""
+    """پس از اتمام ارسال پنل‌های شب — تایمر ۱۲۰ثانیه‌ای برای کمک‌کننده."""
     if not is_mason_scenario(game):
         return
     if game.bot_assistant_user_id is None:

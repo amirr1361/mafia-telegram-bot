@@ -25,6 +25,7 @@ from bot.bazpors_narrator import (
 )
 from bot.game import bazpors_counts_as_mafia_faction, is_synthetic_player_uid
 from bot.models import Game, Player
+from bot.roles.night_state import shiad_night_state
 from bot.roles.registry import find_alive_role_holder, require_role_module
 
 _shiad_role = require_role_module(Role.SHIAD)
@@ -37,11 +38,13 @@ from bot.no_host_night_common import (
 )
 from bot.no_host_role_pick_common import (
     actor_may_act_on_role_panel,
+    append_pending_selection_line,
     build_confirm_cancel_keyboard,
     build_pick_keyboard,
     player_button_name,
     sync_role_mirror_panel,
     target_in_pool,
+    with_inline_confirm_row,
 )
 from bot.observer_delivery import (
     deliver_no_host_player_game_copy,
@@ -65,8 +68,10 @@ def _shiad_panel_already_sent_for_night(game: Game, nc: int) -> bool:
     return bool(sig and sig.startswith(f"{nc}:shiad:"))
 
 
-def _player_button_name(p: Player | None, uid: int) -> str:
-    return player_button_name(p, uid)
+def _player_button_name(
+    p: Player | None, uid: int, display_name: str | None = None
+) -> str:
+    return player_button_name(p, uid, display_name)
 
 
 def _shiad_guess_pool(game: Game) -> list[Player]:
@@ -92,7 +97,9 @@ def build_no_host_shiad_confirm_html(
     game: Game, gm: "GameManager", target_uid: int
 ) -> str:
     p = game.players.get(target_uid)
-    name = html.escape(_player_button_name(p, target_uid))
+    name = html.escape(
+        _player_button_name(p, target_uid, gm.user_display_names.get(target_uid))
+    )
     return (
         f"{build_no_host_shiad_pick_html(game)}\n\n"
         f"🎯 انتخاب شما: <b>{name}</b>\n\n"
@@ -104,7 +111,9 @@ def build_no_host_shiad_waiting_html(
     game: Game, gm: "GameManager", target_uid: int
 ) -> str:
     p = game.players.get(target_uid)
-    name = html.escape(_player_button_name(p, target_uid))
+    name = html.escape(
+        _player_button_name(p, target_uid, gm.user_display_names.get(target_uid))
+    )
     nc = max(1, game.bazpors_narrator_night_count)
     night_lbl = _night_title_fa(nc)
     return (
@@ -148,13 +157,31 @@ def build_no_host_shiad_result_html(game: Game, gm: "GameManager") -> str | None
 def _pick_keyboard(
     game: Game, sh_uid: int, gm: "GameManager"
 ) -> InlineKeyboardMarkup:
-    del gm
-    return build_pick_keyboard(
+    pending = game.no_host_shiad_pending_tid
+    if pending is not None:
+        selected: list[int] = [pending]
+    else:
+        committed = shiad_night_state(game).target_uid
+        selected = [committed] if committed is not None else []
+    kb = build_pick_keyboard(
         game,
         sh_uid,
         pick_act="sgt",
         players=_shiad_guess_pool(game),
+        selected_uids=selected,
+        display_names=gm.user_display_names,
     )
+    # تأیید سبز از رندر اولیه — انتخاب فقط با تأیید نهایی ثبت می‌شود.
+    kb = with_inline_confirm_row(game, sh_uid, kb, confirm_act="sgc")
+    return kb
+
+
+def _shiad_pending_line(game: Game, gm: "GameManager") -> str:
+    tid = game.no_host_shiad_pending_tid
+    if tid is not None:
+        tag = html.escape(gm.format_player_tag(game.players.get(tid))[:40])
+        return f"🎯 انتخاب فعلی: <b>{tag}</b>"
+    return "🎯 انتخاب فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
 
 
 def _confirm_keyboard(game: Game, sh_uid: int) -> InlineKeyboardMarkup:
@@ -422,10 +449,22 @@ async def dispatch_no_host_shiad_night(
         if not target_in_pool(tid, pool):
             await callback.answer("این بازیکن در لیست نیست.", show_alert=True)
             return
+        if game.no_host_shiad_pending_tid == tid:
+            # زدن دوباره روی انتخاب فعلی = لغو انتخاب (بازگشت به لیست).
+            game.no_host_shiad_pending_tid = None
+            await callback.answer("انتخاب لغو شد.")
+            text = build_no_host_shiad_pick_html(game)
+            kb = _pick_keyboard(game, sh_uid, gm)
+            await _sync_panel(bot, game, sh_uid, text, kb)
+            return
         game.no_host_shiad_pending_tid = tid
         await callback.answer("انتخاب شد؛ تأیید کنید.")
-        text = build_no_host_shiad_confirm_html(game, gm, tid)
-        kb = _confirm_keyboard(game, sh_uid)
+        # پنل انتخاب با انتخاب قرمز + تأیید سبز در همان صفحه.
+        text = append_pending_selection_line(
+            build_no_host_shiad_pick_html(game),
+            [_shiad_pending_line(game, gm)],
+        )
+        kb = _pick_keyboard(game, sh_uid, gm)
         await _sync_panel(bot, game, sh_uid, text, kb)
         return
 

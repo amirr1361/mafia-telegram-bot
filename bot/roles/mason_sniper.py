@@ -150,6 +150,20 @@ def clear_mason_sniper_night_selection(game: Game) -> None:
     game.mason_sniper_night_selected_uids = []
 
 
+def mason_sniper_night_no_shot_pending(game: Game) -> bool:
+    return bool(game.mason_sniper_night_no_shot)
+
+
+def clear_mason_sniper_no_shot_pending(game: Game) -> None:
+    game.mason_sniper_night_no_shot = False
+
+
+def clear_mason_commander_pending_decision(game: Game) -> None:
+    """پاک‌سازی تصمیم موقت فرمانده (پنل نامزدها)."""
+    game.mason_commander_pending_decision_uids = []
+    game.mason_commander_pending_reject_all = False
+
+
 def mason_approved_shots_that_kill(game: Game) -> list[int]:
     """اهداف تأییدشده که واقعاً از بازی خارج می‌شوند (بدون مصونیت)."""
     kills: list[int] = []
@@ -171,3 +185,6 @@ def mason_approved_shots_attempted(game: Game) -> list[int]:
 def clear_mason_sniper_night_state(game: Game) -> None:
     game.mason_sniper_night_selected_uids = []
     game.mason_commander_night_approved_uids = []
+    game.mason_sniper_night_no_shot = False
+    game.mason_commander_night_no_shot = False
+    clear_mason_commander_pending_decision(game)

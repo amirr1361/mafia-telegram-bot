@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.game import GameManager
-from bot.mason_night_role import MSM_TAILOR, dispatch_mason_night_role
+from bot.mason_night_role import MSM_CONFIRM, MSM_TAILOR, dispatch_mason_night_role
 from bot.models import Player, Role
 from bot.roles import mason_fraternity as ms_mf
 
@@ -247,7 +247,13 @@ class MasonDeadTailorDispatchTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "bot.mason_recruit_delivery.deliver_mason_recruit_membership_message",
             new=AsyncMock(),
-        ) as deliver:
+        ) as deliver, patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ):
             await dispatch_mason_night_role(
                 cb,
                 bot,
@@ -257,6 +263,19 @@ class MasonDeadTailorDispatchTests(unittest.IsolatedAsyncioTestCase):
                 actor_uid=mason.user_id,
                 act=MSM_TAILOR,
                 tid=tailor.user_id,
+            )
+            # انتخاب موقت — مصرف دکمه فقط پس از تأیید نهایی.
+            self.assertFalse(game.mason_night_mason_confirmed)
+            self.assertFalse(game.mason_tyler_button_consumed)
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=mason.user_id,
+                actor_uid=mason.user_id,
+                act=MSM_CONFIRM,
+                tid=0,
             )
 
         deliver.assert_not_awaited()
@@ -282,6 +301,12 @@ class MasonDeadTailorDispatchTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
         ):
             await dispatch_mason_night_role(
                 cb,
@@ -292,6 +317,16 @@ class MasonDeadTailorDispatchTests(unittest.IsolatedAsyncioTestCase):
                 actor_uid=mason.user_id,
                 act=MSM_TAILOR,
                 tid=tailor.user_id,
+            )
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=mason.user_id,
+                actor_uid=mason.user_id,
+                act=MSM_CONFIRM,
+                tid=0,
             )
 
         self.assertEqual(game.mason_team_member_ids, {mason.user_id})

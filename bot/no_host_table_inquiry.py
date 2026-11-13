@@ -316,7 +316,15 @@ def process_no_host_table_inquiry_narrator_cb(
 async def apply_no_host_table_inquiry_confirm(
     bot: Bot, game: Game, gm: "GameManager"
 ) -> None:
+    # Room 97 idempotency: capture and clear the pending choice
+    # SYNCHRONOUSLY (before the first await) so a racing duplicate
+    # «tinq_ok» callback delivery cannot re-run the resolution / day start.
     choice = game.no_host_table_inquiry_pending
+    game.no_host_table_inquiry_phase = None
+    game.no_host_table_inquiry_pending = None
+    if choice not in ("yes", "no"):
+        # Already applied by a concurrent delivery, or invalid: nothing to do.
+        return
     game.no_host_table_inquiry_resolved_for_day = True
     if choice == "yes":
         text = build_table_inquiry_yes_broadcast_html(game, gm)

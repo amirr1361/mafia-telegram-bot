@@ -185,6 +185,12 @@ def _doctor_ready(game: Game) -> bool:
         return True
     if game.bazpors_nato_action_registered:
         return game.no_host_doctor_pick_confirmed
+    from bot.roles.doctor import blocked_this_night
+
+    if blocked_this_night(game):
+        # Rules: once the mafia special op (Yakuza) is committed this night,
+        # the doctor has no pick - the obligation auto-resolves.
+        return True
     return _role_pick_ready(game, Role.DOCTOR, "no_host_doctor_pick_confirmed")
 
 
@@ -259,6 +265,27 @@ async def maybe_finish_no_host_parallel_night(
     bot: Bot, game: Game, gm: "GameManager"
 ) -> bool:
     """اگر همه آماده‌اند، وارد انضباط/محاسبه شب شو. True یعنی پایان جمع‌آوری انجام شد."""
+    import logging
+
+    from bot.no_host_night_reconcile import reconcile_no_host_night_readiness
+
+    # Generalized readiness reconciliation runs first on every state-changing
+    # night event; it restores, replaces or invalidates panels as required.
+    finished = await reconcile_no_host_night_readiness(bot, game, gm)
+    # Live outstanding-counter refresh on the helper's reminder message
+    # (Mozakere only; the refresh self-guards the scenario and is a
+    # no-op without an active reminder panel). Never reschedules the
+    # timer and never force-finishes by itself.
+    try:
+        from bot.night_helper_reminder import refresh_night_helper_reminder
+
+        await refresh_night_helper_reminder(bot, game)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "night helper reminder refresh failed room=%s", game.room_code
+        )
+    if finished:
+        return True
     if not all_no_host_parallel_night_ready(game):
         return False
     await finish_no_host_parallel_night_collect(bot, game, gm)
@@ -463,6 +490,13 @@ async def finish_no_host_parallel_night_collect(
         return
 
     game.no_host_night_parallel_collect_active = False
+    # یادآور عمومی شب کمک‌کننده دیگر لازم نیست.
+    try:
+        from bot.night_helper_reminder import cleanup_night_helper_reminder
+
+        await cleanup_night_helper_reminder(bot, game)
+    except Exception:
+        pass
     # نجات خود پزشک فقط در پایان شب ثبت می‌شود (پس از ناتو/یاکوزا در _finalize_no_host_night_state).
     game.bazpors_narrator_step = NIGHT_ACTIONS
     _goto_discipline_ask(game)

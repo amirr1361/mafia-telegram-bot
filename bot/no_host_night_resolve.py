@@ -386,6 +386,17 @@ def _finalize_no_host_night_state(game: Game, gm: "GameManager") -> None:
         log_night_resolved(game, gm)
     except Exception:
         pass
+    try:
+        from bot.room_mode import is_mason_scenario
+
+        if is_mason_scenario(game):
+            from bot.mason_elim_report import (
+                refresh_mason_elim_cutoffs_after_night,
+            )
+
+            refresh_mason_elim_cutoffs_after_night(game, gm)
+    except Exception:
+        pass
 
 
 async def _notify_observer_night_end_report(

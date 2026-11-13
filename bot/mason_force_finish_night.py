@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MASON_FORCE_FINISH_NIGHT_COMMAND = "اتمام شب"
+MASON_FORCE_FINISH_BUTTON_TEXT = "🌙 اتمام شب"
 MASON_FORCE_FINISH_NOT_NIGHT_TEXT = "هنوز تو فاز شب نیستیم."
 MASON_FORCE_FINISH_CONFIRM_TEXT = "آیا مطمئن هستید؟"
 MASON_FORCE_FINISH_CANCELLED_TEXT = "لغو شد."
@@ -74,6 +75,24 @@ def _force_finish_confirm_keyboard(game: Game) -> InlineKeyboardMarkup:
                         code=game.room_code, act="no", kind="force_night"
                     ).pack(),
                 ),
+            ]
+        ]
+    )
+
+
+def mason_force_finish_button_keyboard(game: Game) -> InlineKeyboardMarkup:
+    """دکمهٔ «اتمام شب» روی پنل یادآور کمک‌کننده — همان مسیر دستور متنی."""
+    from bot.mason_helper_flow import MasonHelperCb
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=MASON_FORCE_FINISH_BUTTON_TEXT,
+                    callback_data=MasonHelperCb(
+                        code=game.room_code, act="go", kind="force_night_btn"
+                    ).pack(),
+                )
             ]
         ]
     )
@@ -183,12 +202,16 @@ def normalize_pending_mason_night_actions(game: Game, gm: "GameManager") -> None
         sn = ms_sn.find_alive_mason_sniper(game)
         if sn is not None:
             ms_sn.clear_mason_sniper_night_selection(game)
+            game.mason_sniper_night_no_shot = False
             game.mason_night_sniper_confirmed = True
 
     if not _commander_ready(game):
         cmd = ms_cmd.find_alive_mason_commander(game)
         if cmd is not None:
             ms_cmd.mason_commander_rejects_all_shots(game)
+            game.mason_commander_pending_decision_uids = []
+            game.mason_commander_pending_reject_all = False
+            game.mason_commander_night_no_shot = False
             game.mason_night_commander_confirmed = True
 
     if not _gunner_ready(game):
@@ -212,6 +235,7 @@ def normalize_pending_mason_night_actions(game: Game, gm: "GameManager") -> None
 
     if not _detective_ready(game):
         if find_alive_role_holder(game, Role.DETECTIVE) is not None:
+            game.mason_night_detective_pending_uid = None
             game.mason_night_detective_confirmed = True
 
     if not _natasha_ready(game):
@@ -343,6 +367,31 @@ async def handle_mason_force_finish_text(
         MASON_FORCE_FINISH_CONFIRM_TEXT,
         reply_markup=_force_finish_confirm_keyboard(game),
     )
+
+
+async def handle_mason_force_finish_button(
+    callback: CallbackQuery,
+    bot: Bot,
+    game: Game,
+    gm: "GameManager",
+    *,
+    assistant_uid: int,
+) -> None:
+    """دکمهٔ «🌙 اتمام شب» روی پنل یادآور — همان مسیر دستور «اتمام شب» (تأیید بله/خیر)."""
+    if not mason_night_force_finish_collection_active(game):
+        await callback.answer(MASON_FORCE_FINISH_NOT_NIGHT_TEXT, show_alert=True)
+        return
+    await callback.answer()
+    try:
+        await bot.send_message(
+            assistant_uid,
+            MASON_FORCE_FINISH_CONFIRM_TEXT,
+            reply_markup=_force_finish_confirm_keyboard(game),
+        )
+    except Exception:
+        logger.exception(
+            "mason force finish button confirm send failed room=%s", game.room_code
+        )
 
 
 async def handle_mason_force_finish_callback(

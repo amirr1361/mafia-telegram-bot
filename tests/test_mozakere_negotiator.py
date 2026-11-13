@@ -217,7 +217,7 @@ class MozakereNegotiatorPanelPoolTests(unittest.TestCase):
         from bot.no_host_mozakere_negotiation import _pick_keyboard
 
         game = self._game_with_citizen_roles()
-        kb = _pick_keyboard(game, 10)
+        kb = _pick_keyboard(game, 10, self.gm)
         button_texts = [
             btn.text
             for row in kb.inline_keyboard

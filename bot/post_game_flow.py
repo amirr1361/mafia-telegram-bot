@@ -56,6 +56,9 @@ def _players_sorted_for_recap(game: Game) -> list[Player]:
 
 
 def build_post_session_recap_snapshot(game: Game, winner: str) -> dict[str, object]:
+    from bot.room_mode import is_namayande10_no_host_room
+
+    is_nam10 = is_namayande10_no_host_room(game)
     rows: list[dict[str, object]] = []
     for idx, p in enumerate(_players_sorted_for_recap(game), start=1):
         seat_no = p.seat if p.seat is not None else idx
@@ -65,11 +68,23 @@ def build_post_session_recap_snapshot(game: Game, winner: str) -> dict[str, obje
                 "seat": seat_no,
                 "tag": manager.format_player_tag(p),
                 "role": p.role.value if p.role else None,
-                "yakuza_converted": p.bazpors_converted_by_yakuza,
+                "yakuza_converted": (
+                    p.nmnd_converted_by_yakuza
+                    if is_nam10
+                    else p.bazpors_converted_by_yakuza
+                ),
                 "original_role": (
-                    p.bazpors_original_role.value
-                    if p.bazpors_original_role
-                    else None
+                    (
+                        p.nmnd_original_role.value
+                        if p.nmnd_original_role
+                        else None
+                    )
+                    if is_nam10
+                    else (
+                        p.bazpors_original_role.value
+                        if p.bazpors_original_role
+                        else None
+                    )
                 ),
                 "mozakere_converted_by_negotiation": p.mozakere_converted_by_negotiation,
                 "mozakere_original_role": (
@@ -90,6 +105,11 @@ def build_post_session_recap_snapshot(game: Game, winner: str) -> dict[str, obje
         "observer_user_id": game.observer_user_id,
         "max_players": game.max_players,
         "bazpors_host_mode": game.bazpors_host_mode,
+        **(
+            {"nmnd_host_mode": game.nmnd_host_mode}
+            if is_nam10
+            else {}
+        ),
         "rows": rows,
     }
 
@@ -260,6 +280,21 @@ async def broadcast_bazpors_game_end_to_players(
     from bot.models import Role
     from bot.room_mode import is_mason_no_host_room, is_mozakere_no_host_room
 
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if is_namayande10_no_host_room(game):
+        from bot.nam10.dayflow import build_bazpors_game_end_broadcast_html
+
+        text_n = build_bazpors_game_end_broadcast_html(game, winner)
+        for uid_n, p_n in sorted(game.players.items(), key=lambda x: x[0]):
+            if p_n.role == Role.OBSERVER:
+                continue
+            if not p_n.is_alive and not player_should_receive_game_messages(
+                game, uid_n
+            ):
+                continue
+            await safe_send_message(bot, uid_n, text_n, parse_mode="HTML")
+        return
     if game.scenario_name not in (
         "bazpors",
         "bazpors_salamat_test",

@@ -2420,7 +2420,7 @@ class DayDefenseContinuationTests(unittest.TestCase):
                 await self._press_mirror(game, 900, "d1dn")
 
         asyncio.run(run())
-        shot = [row for row in sent if "شلیک مافیا" in row[1]]
+        shot = [row for row in sent if "شلیک امشب مافیا" in row[1]]
         self.assertNotIn(holder.user_id, [row[0] for row in shot])
         self.assertIn(900, [row[0] for row in shot])
         obs = next(row for row in shot if row[0] == 900)
@@ -2529,12 +2529,20 @@ class PostNightContinuationTests(unittest.TestCase):
         async def fake_pair(bot, game, *, player_uid, slot, text, act, exclude, exclude_uids=None):
             nights.append((slot, player_uid, act))
 
+        async def fake_terror_stage(bot, game):
+            terror_uid = next(
+                (uid for uid, p in game.players.items() if p.role == ROLE_TERROR),
+                None,
+            )
+            nights.append(("terror", terror_uid, "zrm_ter"))
+
         return (
             patch("bot.observer_delivery.broadcast_to_alive_players", new=fake_broadcast),
             patch("bot.russian_mafia_flow.safe_send_message", new=fake_private),
             patch("bot.observer_delivery.safe_send_message_return", new=fake_panel),
             patch("bot.russian_mafia_flow._send_pair", new=fake_pair),
             patch("bot.main.on_no_host_entered_night1", new=AsyncMock()),
+            patch("bot.russian_mafia_flow._send_terror_stage_panel", new=fake_terror_stage),
         )
 
     async def _act(self, game, slot: str, actor: int, as_uid: int, target: int):
@@ -2565,7 +2573,7 @@ class PostNightContinuationTests(unittest.TestCase):
         doctor = _alive_uid(game, Role.DOCTOR)
         detective = _alive_uid(game, Role.DETECTIVE)
         patches = self._patches(public, private, panels, nights)
-        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             await _ack_required_waiting(game)
             await self._act(game, "mafia", holder, holder, shot)
             await self._act(game, "doctor", doctor, doctor, save)

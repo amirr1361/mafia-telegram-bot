@@ -18,6 +18,7 @@ from bot.mason_night_entry import (
 )
 from bot.mason_night_role import (
     MASON_SABOTEUR_GUN_SPENT_TEXT,
+    MSS_CONFIRM,
     MSS_NONE,
     dispatch_mason_saboteur_panel,
     dispatch_mason_sniper_panel,
@@ -96,6 +97,14 @@ class Room46RegressionTests(unittest.IsolatedAsyncioTestCase):
                 new_callable=AsyncMock,
             ),
             patch(
+                "bot.mason_night_role.register_mirror_prompt_pair",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "bot.mason_night_role.sync_role_mirror_panel",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "bot.mason_night_role.dispatch_mason_commander_panel",
                 new_callable=AsyncMock,
             ) as cmd,
@@ -108,6 +117,16 @@ class Room46RegressionTests(unittest.IsolatedAsyncioTestCase):
                 as_uid=sn_uid,
                 actor_uid=sn_uid,
                 act=MSS_NONE,
+                tid=0,
+            )
+            await dispatch_mason_night_role(
+                cb,
+                h.bot,
+                h.game,
+                h.gm,
+                as_uid=sn_uid,
+                actor_uid=sn_uid,
+                act=MSS_CONFIRM,
                 tid=0,
             )
         cmd.assert_awaited()

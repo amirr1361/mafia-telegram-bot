@@ -12,11 +12,13 @@ from bot.game import is_synthetic_player_uid
 from bot.models import Game, Player
 from bot.no_host_role_pick_common import (
     actor_may_act_on_role_panel,
+    append_pending_selection_line,
     build_confirm_cancel_keyboard,
     build_pick_keyboard,
     player_button_name,
     sync_role_mirror_panel,
     target_in_pool,
+    with_inline_confirm_row,
 )
 from bot.observer_delivery import (
     broadcast_to_alive_players,
@@ -50,8 +52,10 @@ def _negotiator_ui_key(game: Game, neg_uid: int) -> str:
     return mirror_ui_claim_key(game.room_code, "no_host_negotiator", neg_uid)
 
 
-def _player_button_name(p: Player | None, uid: int) -> str:
-    return player_button_name(p, uid)
+def _player_button_name(
+    p: Player | None, uid: int, display_name: str | None = None
+) -> str:
+    return player_button_name(p, uid, display_name)
 
 
 def build_mozakere_negotiation_broadcast_html() -> str:
@@ -65,9 +69,14 @@ def build_no_host_negotiator_pick_html() -> str:
     )
 
 
-def build_no_host_negotiator_confirm_html(target_uid: int, game: Game) -> str:
+def build_no_host_negotiator_confirm_html(
+    target_uid: int, game: Game, gm: "GameManager" | None = None
+) -> str:
     p = game.players.get(target_uid)
-    name = html.escape(_player_button_name(p, target_uid))
+    display_name = (
+        gm.user_display_names.get(target_uid) if gm is not None else None
+    )
+    name = html.escape(_player_button_name(p, target_uid, display_name))
     return (
         "🤝 <b>مذاکره</b>\n\n"
         f"انتخاب شما:\n<b>{name}</b>\n\n"
@@ -75,9 +84,14 @@ def build_no_host_negotiator_confirm_html(target_uid: int, game: Game) -> str:
     )
 
 
-def build_no_host_negotiator_waiting_html(target_uid: int, game: Game) -> str:
+def build_no_host_negotiator_waiting_html(
+    target_uid: int, game: Game, gm: "GameManager" | None = None
+) -> str:
     p = game.players.get(target_uid)
-    name = html.escape(_player_button_name(p, target_uid))
+    display_name = (
+        gm.user_display_names.get(target_uid) if gm is not None else None
+    )
+    name = html.escape(_player_button_name(p, target_uid, display_name))
     return (
         "🤝 <b>مذاکره</b>\n\n"
         f"✅ انتخاب <b>{name}</b> ثبت شد.\n\n"
@@ -85,13 +99,28 @@ def build_no_host_negotiator_waiting_html(target_uid: int, game: Game) -> str:
     )
 
 
-def _pick_keyboard(game: Game, neg_uid: int) -> InlineKeyboardMarkup:
-    return build_pick_keyboard(
+def _pick_keyboard(
+    game: Game,
+    neg_uid: int,
+    gm: "GameManager",
+    *,
+    selected_uid: int | None = None,
+) -> InlineKeyboardMarkup:
+    kb = build_pick_keyboard(
         game,
         neg_uid,
         pick_act="negp",
         players=negotiation_panel_target_pool(game),
+        display_names=gm.user_display_names,
+        # انتخاب فعلی قرمز (danger) — بقیه آبی (primary).
+        selected_uids=[selected_uid] if selected_uid else None,
     )
+    if is_mozakere_scenario(game):
+        # تأیید سبز (success) طبق قرارداد استایل پنل‌های نقش.
+        kb = with_inline_confirm_row(
+            game, neg_uid, kb, confirm_act="negc", style="success"
+        )
+    return kb
 
 
 def _confirm_keyboard(game: Game, neg_uid: int) -> InlineKeyboardMarkup:
@@ -168,7 +197,6 @@ def mark_mozakere_negotiation_tonight(game: Game) -> None:
 async def start_no_host_mozakere_negotiator_flow(
     bot: Bot, game: Game, gm: "GameManager"
 ) -> bool:
-    del gm
     if not is_mozakere_scenario(game):
         return False
     if game.no_host_negotiator_pick_confirmed:
@@ -180,7 +208,7 @@ async def start_no_host_mozakere_negotiator_flow(
     game.no_host_negotiator_flow_active = True
     game.no_host_negotiator_pending_tid = None
     text = build_no_host_negotiator_pick_html()
-    kb = _pick_keyboard(game, neg.user_id)
+    kb = _pick_keyboard(game, neg.user_id, gm)
     await register_mirror_prompt_pair(
         bot,
         game,
@@ -270,9 +298,33 @@ async def dispatch_no_host_mozakere_negotiator(
         if not target_in_pool(tid, pool):
             await callback.answer("انتخاب نامعتبر.", show_alert=True)
             return
+        if game.no_host_negotiator_pending_tid == tid:
+            # زدن دوباره روی انتخاب فعلی = لغو انتخاب (بازگشت به لیست).
+            game.no_host_negotiator_pending_tid = None
+            await callback.answer("انتخاب لغو شد.")
+            text = build_no_host_negotiator_pick_html()
+            kb = _pick_keyboard(game, neg_uid, gm)
+            await _sync_panel(bot, game, neg_uid, text, kb)
+            return
         game.no_host_negotiator_pending_tid = tid
         await callback.answer("انتخاب شد؛ تأیید کنید.")
-        text = build_no_host_negotiator_confirm_html(tid, game)
+        if is_mozakere_scenario(game):
+            # مذاکره — پنل انتخاب با انتخاب قرمز + تأیید در همان صفحه.
+            from bot.no_host_role_pick_common import append_pending_selection_line
+
+            name = html.escape(
+                _player_button_name(
+                    game.players.get(tid), tid, gm.user_display_names.get(tid)
+                )
+            )
+            text = append_pending_selection_line(
+                build_no_host_negotiator_pick_html(),
+                [f"🤝 انتخاب فعلی: <b>{name}</b>"],
+            )
+            kb = _pick_keyboard(game, neg_uid, gm, selected_uid=tid)
+            await _sync_panel(bot, game, neg_uid, text, kb)
+            return
+        text = build_no_host_negotiator_confirm_html(tid, game, gm)
         kb = _confirm_keyboard(game, neg_uid)
         await _sync_panel(bot, game, neg_uid, text, kb)
         return
@@ -281,7 +333,7 @@ async def dispatch_no_host_mozakere_negotiator(
         game.no_host_negotiator_pending_tid = None
         await callback.answer("بازگشت به لیست.")
         text = build_no_host_negotiator_pick_html()
-        kb = _pick_keyboard(game, neg_uid)
+        kb = _pick_keyboard(game, neg_uid, gm)
         await _sync_panel(bot, game, neg_uid, text, kb)
         return
 
@@ -305,7 +357,7 @@ async def dispatch_no_host_mozakere_negotiator(
         )
 
         await callback.answer("ثبت شد.")
-        wait_text = build_no_host_negotiator_waiting_html(pick, game)
+        wait_text = build_no_host_negotiator_waiting_html(pick, game, gm)
         await _sync_panel(bot, game, neg_uid, wait_text, None)
         try:
             from bot.game_audit_log import log_event

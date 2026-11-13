@@ -29,6 +29,9 @@ MASON_ELIM_REPORT_INVITE_HTML = (
     "روی دکمه «گزارش بازی» بزنید."
 )
 MASON_ELIM_REPORT_BUTTON_TEXT = "📋 گزارش بازی"
+MASON_ELIM_REPORT_NOT_READY_TEXT = (
+    "⏳ گزارش پس از پایان کامل شب فعلی در دسترس قرار می‌گیرد."
+)
 
 _TG_HTML_SAFE_LIMIT = 3500
 
@@ -139,6 +142,13 @@ def capture_mason_elim_report_cutoff(
         return existing
 
     report_html = build_mason_elim_cutoff_report_html(game, gm)
+    # اگر شب جاری هنوز حل نشده، گزارش کاملِ آن شب هنوز در تاریخچه نیست —
+    # گزارش پس از «night.resolved» همان شب بازسازی و قطعی می‌شود.
+    pending_night = int(game.bazpors_narrator_night_count or 0)
+    from bot.mason_final_outcome import find_mason_final_night_outcome
+
+    if pending_night < 1 or find_mason_final_night_outcome(game, pending_night) is not None:
+        pending_night = None
     entry: dict[str, Any] = {
         "uid": uid,
         "room_code": game.room_code,
@@ -146,9 +156,48 @@ def capture_mason_elim_report_cutoff(
         "elim_ts": _utc_iso_now(),
         "report_html": report_html,
         "invite_sent": False,
+        "pending_night": pending_night,
     }
     game.mason_elim_report_cutoffs[uid] = entry
     return entry
+
+
+def refresh_mason_elim_cutoffs_after_night(
+    game: Game, gm: "GameManager | None" = None
+) -> None:
+    """پس از حل‌شدن شب — بازسازی گزارش‌های در انتظارِ همان شب (قطعی و تغییرناپذیر).
+
+    فقط ماسون؛ گزارش‌های قبلاً قطعی‌شده دست‌نخورده می‌مانند.
+    """
+    if not is_mason_scenario(game):
+        return
+    from bot.mason_final_outcome import find_mason_final_night_outcome
+
+    for entry in game.mason_elim_report_cutoffs.values():
+        if not isinstance(entry, dict):
+            continue
+        pending_night = entry.get("pending_night")
+        if not pending_night:
+            continue
+        if find_mason_final_night_outcome(game, int(pending_night)) is None:
+            continue
+        entry["report_html"] = build_mason_elim_cutoff_report_html(game, gm)
+        entry["pending_night"] = None
+
+
+def mason_elim_cutoff_awaiting_night(game: Game, as_uid: int) -> int | None:
+    """شبی که گزارش این بازیکن منتظرِ حل‌شدن آن است — None یعنی آماده."""
+    entry = game.mason_elim_report_cutoffs.get(as_uid)
+    if not isinstance(entry, dict):
+        return None
+    pending_night = entry.get("pending_night")
+    if not pending_night:
+        return None
+    from bot.mason_final_outcome import find_mason_final_night_outcome
+
+    if find_mason_final_night_outcome(game, int(pending_night)) is None:
+        return int(pending_night)
+    return None
 
 
 def mason_elim_report_keyboard(game: Game, as_uid: int) -> InlineKeyboardMarkup:
@@ -289,6 +338,19 @@ async def handle_mason_elim_report_callback(
         )
         return
 
+    from bot.app_state import manager
+
+    # گزارش‌های در انتظارِ حل‌شدن شب حذف — بازسازی از تاریخچهٔ قطعی و قطعی‌سازی.
+    refresh_mason_elim_cutoffs_after_night(game, manager)
+    awaiting_night = mason_elim_cutoff_awaiting_night(game, as_uid)
+    if awaiting_night is not None:
+        await safe_callback_answer(
+            callback,
+            MASON_ELIM_REPORT_NOT_READY_TEXT,
+            show_alert=True,
+        )
+        return
+
     report_html = resolve_mason_elim_report_html(game, as_uid, gts=gts)
     if report_html is None:
         await safe_callback_answer(
@@ -297,6 +359,23 @@ async def handle_mason_elim_report_callback(
             show_alert=True,
         )
         return
+
+    # گزارش زنده: در هر درخواست، گزارش تجمعی از روی تاریخچهٔ قطعیِ
+    # فعلی بازسازی می‌شود؛ اسنپ‌شاتِ ثبت‌شده فقط عقب‌نشینی ایمن است.
+    from bot.app_state import manager as _live_manager
+
+    try:
+        _fresh_html = build_mason_elim_cutoff_report_html(game, _live_manager)
+    except Exception:
+        logger.exception(
+            "mason live report rebuild failed room=%s", game.room_code
+        )
+        _fresh_html = None
+    if _fresh_html and _fresh_html.strip():
+        report_html = _fresh_html
+        _entry = game.mason_elim_report_cutoffs.get(as_uid)
+        if isinstance(_entry, dict):
+            _entry["report_html"] = _fresh_html
 
     await safe_callback_answer(callback)
     await deliver_mason_elim_report_chunks(bot, actor, report_html)

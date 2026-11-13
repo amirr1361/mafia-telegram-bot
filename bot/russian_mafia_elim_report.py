@@ -446,6 +446,23 @@ async def handle_russian_mafia_elim_report_callback(
             show_alert=True,
         )
         return
+    # گزارش زنده: در هر درخواست، گزارش تجمعی از روی تاریخچهٔ قطعیِ
+    # فعلی بازسازی می‌شود؛ اسنپ‌شاتِ ثبت‌شده فقط عقب‌نشینی ایمن است.
+    from bot.app_state import manager as _live_manager
+
+    try:
+        _fresh_html = build_russian_mafia_elim_cutoff_report_html(game, _live_manager)
+    except Exception:
+        logger.exception(
+            "russian_mafia live report rebuild failed room=%s", game.room_code
+        )
+        _fresh_html = None
+    if _fresh_html and _fresh_html.strip():
+        report = _fresh_html
+        _entry = game.russian_mafia_elim_report_cutoffs.get(as_uid)
+        if isinstance(_entry, dict):
+            _entry["report_html"] = _fresh_html
+
     await safe_callback_answer(callback)
     await deliver_russian_mafia_elim_report_chunks(bot, actor, report)
 

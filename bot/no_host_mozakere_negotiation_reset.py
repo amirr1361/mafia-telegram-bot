@@ -8,7 +8,11 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup
 
 from bot.models import Game
-from bot.no_host_role_pick_common import build_single_action_keyboard
+from bot.no_host_role_pick_common import (
+    build_single_action_keyboard,
+    close_mirror_panel_refs,
+    sync_role_mirror_panel,
+)
 from bot.observer_delivery import update_mirror_prompt_pair
 from bot.room_mode import is_mozakere_scenario
 from bot.roles.registry import find_alive_role_holder
@@ -138,28 +142,185 @@ async def apply_mozakere_negotiation_citizen_resets(
     if not is_mozakere_scenario(game):
         return
 
+    # Commit processing resolves the pending negotiation window; the
+    # doctor/detective/sniper callback guards must be lifted from here
+    # on (idempotent — the negc dispatch already sets this flag).
+    game.no_host_negotiator_pick_confirmed = True
+
     await _reset_mozakere_doctor_after_negotiation(bot, game, gm)
 
+    det = find_alive_role_holder(game, Role.DETECTIVE)
     det_resend = reset_mozakere_detective_after_negotiation(game)
-    if det_resend:
-        from bot.no_host_detective_night import start_no_host_detective_night_flow
+    if det is not None and (
+        det_resend or not game.no_host_detective_pick_confirmed
+    ):
+        from bot.no_host_detective_night import (
+            _detective_ui_key,
+            start_no_host_detective_night_flow,
+        )
 
+        # Close the invalidated (or negotiation-suspended) detective
+        # panel (player and observer mirror) BEFORE delivering the
+        # replacement, so its refs are not overwritten and no stale
+        # keyboard survives.
+        if not det_resend:
+            # Panel was suspended during the pending negotiation
+            # window: re-open an actionable panel now that the
+            # negotiation is committed and the night can proceed.
+            game.no_host_detective_dm_signature = None
+        await close_mirror_panel_refs(
+            bot, game, _detective_ui_key(game, det.user_id)
+        )
         await start_no_host_detective_night_flow(
             bot, game, gm, at_night_entry=True
         )
 
+    sn = find_alive_role_holder(game, Role.SNIPER)
+    from bot.roles import sniper as sniper_role
+
     sn_resend = reset_mozakere_sniper_after_negotiation(game)
-    if sn_resend:
-        from bot.roles import sniper as sniper_role
-        from bot.no_host_sniper_night import start_no_host_sniper_night_flow
+    if sn is not None and sn_resend:
+        from bot.no_host_sniper_night import (
+            _sniper_ui_key,
+            start_no_host_sniper_night_flow,
+        )
 
         if sniper_role.can_shoot(game):
+            # Close the invalidated pre-negotiation sniper panel before
+            # delivering the replacement (same stale-ref protection).
+            await close_mirror_panel_refs(
+                bot, game, _sniper_ui_key(game, sn.user_id)
+            )
             await start_no_host_sniper_night_flow(
                 bot, game, gm, at_night_entry=True
             )
         else:
             game.no_host_sniper_pick_confirmed = True
+    elif (
+        sn is not None
+        and not game.no_host_sniper_pick_confirmed
+        and sniper_role.can_shoot(game)
+    ):
+        # Panel was suspended during the pending negotiation window:
+        # re-open an actionable sniper panel now that the negotiation
+        # is committed and the night can proceed.
+        from bot.no_host_sniper_night import (
+            _sniper_ui_key,
+            start_no_host_sniper_night_flow,
+        )
+
+        game.no_host_sniper_dm_signature = None
+        await close_mirror_panel_refs(
+            bot, game, _sniper_ui_key(game, sn.user_id)
+        )
+        await start_no_host_sniper_night_flow(
+            bot, game, gm, at_night_entry=True
+        )
 
     from bot.no_host_night_ready import maybe_finish_no_host_parallel_night
 
     await maybe_finish_no_host_parallel_night(bot, game, gm)
+
+
+MOZAKERE_NEGOTIATION_PENDING_ALERT = (
+    "هم‌اکنون مذاکرهٔ مافیا در جریان است؛ لطفاً چند لحظه منتظر بمانید."
+)
+
+MOZAKERE_NEGOTIATION_PANEL_SUSPENDED_HTML = (
+    "🤝 <b>تیم مافیا در حال مذاکره است.</b>\n\n"
+    "⏳ انتخاب شما تا پایان مذاکره غیرفعال است؛ لطفاً منتظر بمانید."
+)
+
+
+def mozakere_negotiation_pending(game: Game) -> bool:
+    """مذاکره انتخاب شده ولی هدفش هنوز تأیید نشده — پنجرهٔ تعلیق."""
+    if not is_mozakere_scenario(game):
+        return False
+    from bot.roles.night_state import mozakere_negotiation_night_state
+
+    return bool(mozakere_negotiation_night_state(game).tonight) and (
+        not game.no_host_negotiator_pick_confirmed
+    )
+
+
+def _mozakere_sniper_can_shoot(game: Game) -> bool:
+    from bot.roles import sniper as sniper_role
+
+    return sniper_role.can_shoot(game)
+
+
+def _mozakere_negotiation_suspension_targets(
+    game: Game,
+) -> list[tuple[int, str]]:
+    """(uid, ui_key) of the LIVE, unconfirmed pick panels to suspend.
+
+    Confirmed holders already sit on keyboard-less waiting panels, so
+    only unconfirmed holders hold actionable keyboards right now.
+    """
+    from bot.no_host_detective_night import _detective_ui_key
+    from bot.no_host_doctor_night import _doctor_ui_key
+    from bot.no_host_sniper_night import _sniper_ui_key
+
+    targets: list[tuple[int, str]] = []
+    doc = find_alive_role_holder(game, Role.DOCTOR)
+    if doc is not None and not game.no_host_doctor_pick_confirmed:
+        targets.append((doc.user_id, _doctor_ui_key(game, doc.user_id)))
+    det = find_alive_role_holder(game, Role.DETECTIVE)
+    if det is not None and not game.no_host_detective_pick_confirmed:
+        targets.append((det.user_id, _detective_ui_key(game, det.user_id)))
+    sn = find_alive_role_holder(game, Role.SNIPER)
+    if (
+        sn is not None
+        and not game.no_host_sniper_pick_confirmed
+        and _mozakere_sniper_can_shoot(game)
+    ):
+        targets.append((sn.user_id, _sniper_ui_key(game, sn.user_id)))
+    return targets
+
+
+async def suspend_mozakere_town_panels_for_negotiation(
+    bot: "Bot", game: Game
+) -> int:
+    """Initiation-time suspension (Mozakere-only, Room 44 fix).
+
+    The moment «تیم مافیا در حال مذاکره» is announced, the live
+    doctor/detective/sniper pick panels — player AND observer
+    mirrors — are edited IN PLACE to a keyboard-less neutral state.
+    No new messages are created, tracked refs are preserved, and
+    confirmed/pending pick state is NOT touched here: voiding stays
+    at commit (apply_mozakere_negotiation_citizen_resets).
+    Returns the number of suspended panels.
+    """
+    if not mozakere_negotiation_pending(game):
+        return 0
+    suspended = 0
+    for uid, ui_key in _mozakere_negotiation_suspension_targets(game):
+        entry = game.mirror_prompt_messages.get(ui_key)
+        if not isinstance(entry, dict):
+            continue
+        if not (entry.get("player") or entry.get("observer")):
+            continue
+        try:
+            await sync_role_mirror_panel(
+                bot,
+                game,
+                ui_key,
+                uid,
+                MOZAKERE_NEGOTIATION_PANEL_SUSPENDED_HTML,
+                None,
+            )
+            suspended += 1
+        except Exception:
+            continue
+    if suspended:
+        try:
+            from bot.game_audit_log import log_event
+
+            log_event(
+                game,
+                "no_host.mozakere_town_panels_suspended",
+                count=suspended,
+            )
+        except Exception:
+            pass
+    return suspended

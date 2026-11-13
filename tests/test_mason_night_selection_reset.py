@@ -126,7 +126,9 @@ class MasonNightSelectionResetTests(unittest.TestCase):
             for row in captured_kb[0].inline_keyboard
             for btn in row
         ]
-        self.assertTrue(any("انتخاب دوم ندارم" in t for t in labels))
+        self.assertTrue(any("بدون شلیک" in t for t in labels))
+        self.assertTrue(any("✅ تأیید انتخاب" in t for t in labels))
+        self.assertFalse(any("انتخاب دوم ندارم" in t for t in labels))
         self.assertFalse(any("انتخاب سوم ندارم" in t for t in labels))
 
     def test_commander_night2_panel_starts_fresh(self) -> None:

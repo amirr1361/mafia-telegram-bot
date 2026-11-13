@@ -36,6 +36,7 @@ from bot.russian_mafia_flow import (
     route_russian_player_callback,
     send_russian_citizen_wait_panels,
 )
+from bot.player_role_pick_common import inline_button_supports_style
 from bot.russian_mafia_post_night import (
     _discipline_ask_keyboard,
     handle_russian_host_post_night,
@@ -259,12 +260,29 @@ class NightConfirmationTests(unittest.TestCase):
         self.assertFalse(game.russian_mafia_detective_confirmed)
         self.assertEqual(game.russian_mafia_doctor_self_save_count, 0)
         self.assertIsNone(game.russian_mafia_doctor_target)
-        self.assertTrue(any(target == doctor for _text, target in seen))
+        self.assertTrue(
+            any("هدف انتخاب‌شده" in text for text, _target in seen)
+        )
         keyboard = _confirm_keyboard(
             game, slot="doctor", as_uid=doctor, target_uid=doctor, mirror=False
         )
-        labels = [button.text for row in keyboard.inline_keyboard for button in row]
-        self.assertEqual(labels, ["✅ بله، تأیید", "↩️ بازگشت"])
+        buttons = [button for row in keyboard.inline_keyboard for button in row]
+        self.assertEqual(
+            [button.text for button in buttons[-1:]],
+            ["✅ تأیید انتخاب"],
+        )
+        grid = [
+            button
+            for button in buttons[:-1]
+            if button.callback_data.startswith("rmf:")
+        ]
+        self.assertTrue(grid)
+        if inline_button_supports_style():
+            self.assertEqual(buttons[-1].style, "success")
+            self.assertEqual(
+                {button.style for button in grid},
+                {"primary", "danger"},
+            )
 
     def test_only_final_confirmation_increments_self_save_and_can_change_target(self) -> None:
         game = self._armed()

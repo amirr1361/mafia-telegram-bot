@@ -23,16 +23,20 @@ from bot.no_host_night_common import (
 )
 from bot.no_host_role_pick_common import (
     actor_may_act_on_role_panel,
+    append_pending_selection_line,
     build_confirm_cancel_keyboard,
     build_pick_keyboard,
+    mirror_panel_superseded,
     player_button_name,
     sync_role_mirror_panel,
     target_in_pool,
+    with_inline_confirm_row,
 )
 from bot.observer_delivery import (
     deliver_no_host_player_game_copy,
     mirror_ui_claim_key,
     no_host_observer_registered,
+    publish_mirror_prompt_pair,
     register_mirror_prompt_pair,
     send_to_player,
     update_mirror_prompt_pair,
@@ -55,8 +59,10 @@ def _journalist_ui_key(game: Game, jr_uid: int) -> str:
     return mirror_ui_claim_key(game.room_code, "no_host_journalist", jr_uid)
 
 
-def _player_button_name(p: Player | None, uid: int) -> str:
-    return player_button_name(p, uid)
+def _player_button_name(
+    p: Player | None, uid: int, display_name: str | None = None
+) -> str:
+    return player_button_name(p, uid, display_name)
 
 
 def build_no_host_journalist_idle_html(*, confirmed: bool = False) -> str:
@@ -89,9 +95,10 @@ def build_no_host_journalist_pick_html(game: Game) -> str:
 def build_no_host_journalist_confirm_html(
     game: Game, gm: "GameManager", target_uid: int
 ) -> str:
-    del gm
     p = game.players.get(target_uid)
-    name = html.escape(_player_button_name(p, target_uid))
+    name = html.escape(
+        _player_button_name(p, target_uid, gm.user_display_names.get(target_uid))
+    )
     if mozakere_journalist_active(game):
         return (
             "👤 <b>خبرنگار</b>\n\n"
@@ -109,7 +116,9 @@ def build_no_host_journalist_waiting_html(
     game: Game, gm: "GameManager", target_uid: int
 ) -> str:
     p = game.players.get(target_uid)
-    name = html.escape(_player_button_name(p, target_uid))
+    name = html.escape(
+        _player_button_name(p, target_uid, gm.user_display_names.get(target_uid))
+    )
     nc = max(1, game.bazpors_narrator_night_count)
     night_lbl = _night_title_fa(nc)
     return (
@@ -169,13 +178,18 @@ def _idle_keyboard(game: Game, jr_uid: int) -> InlineKeyboardMarkup:
 def _pick_keyboard(
     game: Game, jr_uid: int, gm: "GameManager"
 ) -> InlineKeyboardMarkup:
-    del gm
-    return build_pick_keyboard(
+    pending = game.no_host_journalist_pending_tid
+    kb = build_pick_keyboard(
         game,
         jr_uid,
         pick_act="jrp",
         players=investigation_pool(game),
+        selected_uids=[pending] if pending is not None else [],
+        display_names=gm.user_display_names,
     )
+    if is_mozakere_scenario(game):
+        kb = with_inline_confirm_row(game, jr_uid, kb, confirm_act="jrc")
+    return kb
 
 
 def _confirm_keyboard(game: Game, jr_uid: int) -> InlineKeyboardMarkup:
@@ -210,18 +224,34 @@ async def activate_journalist_after_mozakere_negotiation(
     text = build_no_host_journalist_pick_html(game)
     kb = _pick_keyboard(game, jr.user_id, gm)
     ui_key = _journalist_ui_key(game, jr.user_id)
-    await register_mirror_prompt_pair(
+    # Edit the previous (idle/OK or pick) panel in place into the
+    # target-selection panel; only sends a fresh message when no
+    # tracked refs exist. Never creates a second same-type panel
+    # (Room 44 duplicate bug).
+    await publish_mirror_prompt_pair(
         bot,
         game,
         jr.user_id,
         ui_key,
         text,
         kb,
+        fresh_observer_copy=False,
         send_player=True,
         send_observer=no_host_observer_registered(game),
         observer_same_text=False,
         parse_mode="HTML",
     )
+    entry = game.mirror_prompt_messages.get(ui_key) or {}
+    if entry.get("player") or entry.get("observer"):
+        # Panel was delivered: record the night-entry signature and
+        # the per-night post-negotiation marker so the readiness
+        # reconcile loop (missing_panel_restored) and the host-step
+        # push cannot send a second identical panel this night.
+        nc_now = game.bazpors_narrator_night_count
+        game.no_host_journalist_dm_signature = (
+            f"{nc_now}:journalist:night_entry:pick"
+        )
+        game.no_host_journalist_neg_panel_sent_night = nc_now
     try:
         from bot.game_audit_log import log_event
 
@@ -261,6 +291,8 @@ async def start_no_host_journalist_night_flow(
 
     if active:
         if game.no_host_journalist_pick_confirmed:
+            return False
+        if game.no_host_journalist_neg_panel_sent_night == nc:
             return False
         if game.no_host_journalist_dm_signature == sig:
             return False
@@ -483,6 +515,15 @@ async def dispatch_no_host_journalist_night(
     act: str,
     tid: int,
 ) -> None:
+    pressed_msg = getattr(getattr(callback, "message", None), "message_id", None)
+    if mirror_panel_superseded(
+        game, _journalist_ui_key(game, jr_uid), pressed_msg
+    ):
+        await callback.answer(
+            "این پنل قدیمی است و دیگر معتبر نیست.", show_alert=True
+        )
+        return
+
     if act == "jic":
         await dispatch_no_host_journalist_idle_confirm(
             callback, bot, game, gm, jr_uid=jr_uid, actor_uid=actor_uid
@@ -518,8 +559,28 @@ async def dispatch_no_host_journalist_night(
         if not target_in_pool(tid, pool):
             await callback.answer("انتخاب نامعتبر.", show_alert=True)
             return
+        if game.no_host_journalist_pending_tid == tid:
+            # زدن دوباره روی انتخاب فعلی = لغو انتخاب (بازگشت به لیست).
+            game.no_host_journalist_pending_tid = None
+            await callback.answer("انتخاب لغو شد.")
+            text = build_no_host_journalist_pick_html(game)
+            kb = _pick_keyboard(game, jr_uid, gm)
+            await _sync_panel(bot, game, jr_uid, text, kb)
+            return
         game.no_host_journalist_pending_tid = tid
         await callback.answer("انتخاب شد؛ تأیید کنید.")
+        if is_mozakere_scenario(game):
+            # مذاکره — پنل انتخاب با انتخاب قرمز + تأیید در همان صفحه.
+            from bot.no_host_role_pick_common import append_pending_selection_line
+
+            tag = html.escape(gm.format_player_tag(game.players.get(tid))[:40])
+            text = append_pending_selection_line(
+                build_no_host_journalist_pick_html(game),
+                [f"🟢 انتخاب فعلی: <b>{tag}</b>"],
+            )
+            kb = _pick_keyboard(game, jr_uid, gm)
+            await _sync_panel(bot, game, jr_uid, text, kb)
+            return
         text = build_no_host_journalist_confirm_html(game, gm, tid)
         kb = _confirm_keyboard(game, jr_uid)
         await _sync_panel(bot, game, jr_uid, text, kb)

@@ -17,10 +17,11 @@ from bot.mason_multi_select_panels import (
     mason_selection_ordinal_fa,
 )
 from bot.mason_night_role import (
-    MSC_DONE,
-    MSC_PICK,
-    MSD_DONE,
+    MSC_DEC_CONFIRM,
+    MSC_DEC_PICK,
+    MSD_CONFIRM,
     MSD_PICK,
+    MSS_CONFIRM,
     MSS_NONE,
     MSS_PICK,
     _show_mason_commander_panel,
@@ -337,9 +338,11 @@ class MasonMultiSelectPanelRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("انتخاب‌های مجاز شما: 1 از 2", text)
         self.assertIn("انتخاب اول: A", text)
-        self.assertNotIn(21, player_ids)
+        self.assertIn(21, player_ids)
         self.assertIn(22, player_ids)
-        self.assertTrue(any("انتخاب دوم ندارم" in t for t in button_texts))
+        self.assertTrue(any("بدون شلیک" in t for t in button_texts))
+        self.assertFalse(any("انتخاب دوم ندارم" in t for t in button_texts))
+        self.assertTrue(any("✅ تأیید انتخاب" in t for t in button_texts))
 
     async def test_doctor_panel_text_and_buttons_after_first_save(self) -> None:
         gm = GameManager()
@@ -355,9 +358,10 @@ class MasonMultiSelectPanelRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("انتخاب‌های مجاز شما: 1 از 3", text)
         self.assertIn("انتخاب اول: A", text)
-        self.assertNotIn(21, player_ids)
+        self.assertIn(21, player_ids)
         self.assertIn(22, player_ids)
-        self.assertTrue(any("انتخاب دوم ندارم" in t for t in button_texts))
+        self.assertTrue(any("انتخابی ندارم" in t for t in button_texts))
+        self.assertTrue(any("✅ تأیید انتخاب" in t for t in button_texts))
 
     async def test_doctor_third_step_button_after_two_saves(self) -> None:
         gm = GameManager()
@@ -374,7 +378,7 @@ class MasonMultiSelectPanelRefreshTests(unittest.IsolatedAsyncioTestCase):
             _show_mason_doctor_panel, game, gm, 40
         )
         self.assertIn("انتخاب‌های مجاز شما: 2 از 4", text)
-        self.assertTrue(any("انتخاب سوم ندارم" in t for t in button_texts))
+        self.assertTrue(any("انتخابی ندارم" in t for t in button_texts))
 
     async def test_commander_panel_text_and_buttons_after_first_approval(self) -> None:
         gm = GameManager()
@@ -384,17 +388,17 @@ class MasonMultiSelectPanelRefreshTests(unittest.IsolatedAsyncioTestCase):
         gm.add_player(game, _p(22, "B", Role.TOWN_SIMPLE))
         gm.add_player(game, _p(40, "Cmd", Role.COMMANDER))
         ms_sn.commit_mason_sniper_night_selection(game, [21, 22])
-        ms_cmd.add_mason_commander_approval(game, 21)
+        game.mason_commander_pending_decision_uids = [21]
 
-        text, player_ids, button_texts = await self._capture_panel(
+        text, _player_ids, button_texts = await self._capture_panel(
             _show_mason_commander_panel, game, gm, 40
         )
-        self.assertIn("انتخاب‌های مجاز شما: 1 از 2", text)
-        self.assertIn("تأیید اول: A", text)
-        self.assertNotIn(21, player_ids)
-        self.assertIn(22, player_ids)
-        self.assertTrue(any("انتخاب دوم ندارم" in t for t in button_texts))
-        self.assertFalse(any("رد همه" in t for t in button_texts))
+        self.assertIn("اهداف پیشنهادی اسنایپر: A, B", text)
+        self.assertIn("🎯 تأیید شلیک به A", button_texts)
+        self.assertIn("🎯 تأیید شلیک به B", button_texts)
+        self.assertIn("🎯 تأیید شلیک به هر دو بازیکن", button_texts)
+        self.assertIn("🚫 رد تمام درخواست‌های شلیک", button_texts)
+        self.assertIn("✅ تأیید انتخاب", button_texts)
 
 
 class MasonMultiSelectHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -423,6 +427,9 @@ class MasonMultiSelectHandlerTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role._show_mason_sniper_panel",
+            new=AsyncMock(),
         ):
             await dispatch_mason_night_role(
                 cb,
@@ -434,9 +441,34 @@ class MasonMultiSelectHandlerTests(unittest.IsolatedAsyncioTestCase):
                 act=MSS_NONE,
                 tid=0,
             )
-        self.assertEqual(ms_sn.mason_sniper_night_selected_uids(game), [21])
+        # انتخاب موقت «بدون شلیک» — اهداف پاک و شلیک اجرا نشده
+        self.assertEqual(ms_sn.mason_sniper_night_selected_uids(game), [])
+        self.assertTrue(game.mason_sniper_night_no_shot)
+        self.assertFalse(game.mason_night_sniper_confirmed)
         self.assertEqual(ms_sn.mason_sniper_bullets_spent(game), 0)
-        self.assertIn("A", captured[0])
+        with patch(
+            "bot.mason_night_role.finalize_no_host_role_pick_message",
+            side_effect=_capture_finalize,
+        ), patch(
+            "bot.mason_night_role.dispatch_mason_commander_panel",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_ready.maybe_finish_mason_parallel_night",
+            new=AsyncMock(),
+        ):
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=50,
+                actor_uid=50,
+                act=MSS_CONFIRM,
+                tid=0,
+            )
+        self.assertTrue(game.mason_night_sniper_confirmed)
+        self.assertEqual(ms_sn.mason_sniper_bullets_spent(game), 0)
+        self.assertIn("بدون شلیک", captured[0])
 
     async def test_sniper_early_stop_with_one_target(self) -> None:
         gm = GameManager()
@@ -465,8 +497,9 @@ class MasonMultiSelectHandlerTests(unittest.IsolatedAsyncioTestCase):
                 cb, bot, game, gm, as_uid=50, actor_uid=50, act=MSS_PICK, tid=21
             )
             await dispatch_mason_night_role(
-                cb, bot, game, gm, as_uid=50, actor_uid=50, act=MSS_NONE, tid=0
+                cb, bot, game, gm, as_uid=50, actor_uid=50, act=MSS_CONFIRM, tid=0
             )
+        # تأیید با یک هدف از دو گلوله — گلولهٔ دوم محفوظ می‌ماند
         self.assertEqual(ms_sn.mason_sniper_night_selected_uids(game), [21])
         self.assertTrue(game.mason_night_sniper_confirmed)
         self.assertEqual(ms_sn.mason_sniper_bullets_spent(game), 0)
@@ -495,7 +528,7 @@ class MasonMultiSelectHandlerTests(unittest.IsolatedAsyncioTestCase):
                 cb, bot, game, gm, as_uid=40, actor_uid=40, act=MSD_PICK, tid=21
             )
             await dispatch_mason_night_role(
-                cb, bot, game, gm, as_uid=40, actor_uid=40, act=MSD_DONE, tid=0
+                cb, bot, game, gm, as_uid=40, actor_uid=40, act=MSD_CONFIRM, tid=0
             )
         self.assertEqual(ms_doc.mason_doctor_night_save_uids(game), [21])
         self.assertTrue(game.mason_night_doctor_confirmed)
@@ -523,11 +556,15 @@ class MasonMultiSelectHandlerTests(unittest.IsolatedAsyncioTestCase):
             "bot.mason_night_role._show_mason_commander_panel",
             new=AsyncMock(),
         ):
+            # انتخاب تصمیم «تأیید شلیک به A» (تک‌انتخاب)
             await dispatch_mason_night_role(
-                cb, bot, game, gm, as_uid=40, actor_uid=40, act=MSC_PICK, tid=21
+                cb, bot, game, gm, as_uid=40, actor_uid=40, act=MSC_DEC_PICK, tid=1
             )
+            self.assertEqual(game.mason_commander_pending_decision_uids, [21])
+            self.assertEqual(ms_sn.mason_sniper_bullets_spent(game), 0)
+            self.assertFalse(game.mason_night_commander_confirmed)
             await dispatch_mason_night_role(
-                cb, bot, game, gm, as_uid=40, actor_uid=40, act=MSC_DONE, tid=0
+                cb, bot, game, gm, as_uid=40, actor_uid=40, act=MSC_DEC_CONFIRM, tid=0
             )
         self.assertEqual(ms_cmd.mason_commander_approved_shot_uids(game), [21])
         self.assertEqual(ms_sn.mason_sniper_bullets_spent(game), 1)
@@ -607,6 +644,7 @@ class MasonMultiSelectHandlerTests(unittest.IsolatedAsyncioTestCase):
             "bot.mason_night_role._show_mason_commander_panel",
             refreshed,
         ):
+            # حالت ب — لمس نامزد، تصمیم موقت را ثبت می‌کند (بدون اجرا)
             await dispatch_mason_night_role(
                 cb,
                 bot,
@@ -614,12 +652,13 @@ class MasonMultiSelectHandlerTests(unittest.IsolatedAsyncioTestCase):
                 gm,
                 as_uid=40,
                 actor_uid=40,
-                act=MSC_PICK,
-                tid=21,
+                act=MSC_DEC_PICK,
+                tid=1,
             )
         refreshed.assert_awaited_once()
         self.assertFalse(game.mason_night_commander_confirmed)
-        self.assertEqual(ms_cmd.mason_commander_approved_shot_uids(game), [21])
+        self.assertEqual(game.mason_commander_pending_decision_uids, [21])
+        self.assertEqual(ms_cmd.mason_commander_approved_shot_uids(game), [])
 
 
 class BazporsUnchangedRegressionTests(unittest.TestCase):

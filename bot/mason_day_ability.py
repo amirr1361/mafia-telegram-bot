@@ -11,10 +11,14 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from bot.bazpors_narrator import eliminate_player_from_game
 from bot.game import is_mafia_team, is_synthetic_player_uid
 from bot.models import Game, Role
+from bot.mason_multi_select_panels import (
+    MASON_DECL_CONFIRM_QUESTION,
+    build_mason_declare_confirm_keyboard,
+    build_mason_declare_intent_keyboard,
+    build_mason_single_pick_keyboard,
+)
 from bot.no_host_role_pick_common import (
     actor_may_act_on_role_panel,
-    build_confirm_cancel_keyboard,
-    build_pick_keyboard,
     sync_role_mirror_panel,
 )
 from bot.observer_delivery import (
@@ -55,6 +59,11 @@ MASON_COWBOY_BACK_ACT = "mcb"
 MASON_DAY_GUN_PICK_ACT = "mdgp"
 MASON_DAY_GUN_CONFIRM_ACT = "mdgc"
 MASON_DAY_GUN_BACK_ACT = "mdgb"
+# دو مرحلهٔ «اعلام نقش و انتخاب بازیکن» — فقط آپاچی/کابوی ماسون
+MASON_APACHE_DECL_INTENT_ACT = "madi"
+MASON_APACHE_DECL_OK_ACT = "mado"
+MASON_COWBOY_DECL_INTENT_ACT = "mcdi"
+MASON_COWBOY_DECL_OK_ACT = "mcdo"
 MASON_DAY_DEAD_PLAYER_ALERT_FA = "این بازیکن دیگر در بازی نیست."
 MASON_DAY_PANEL_INACTIVE_FA = "این پنل دیگر فعال نیست."
 MASON_DAY_PANEL_INACTIVE_ALERT_FA = "این پنل دیگر فعال نیست."
@@ -89,6 +98,10 @@ def mason_day_ability_act_active(game: Game, act: str) -> bool:
         MASON_DAY_GUN_PICK_ACT,
         MASON_DAY_GUN_CONFIRM_ACT,
         MASON_DAY_GUN_BACK_ACT,
+        MASON_APACHE_DECL_INTENT_ACT,
+        MASON_APACHE_DECL_OK_ACT,
+        MASON_COWBOY_DECL_INTENT_ACT,
+        MASON_COWBOY_DECL_OK_ACT,
     )
 
 
@@ -450,6 +463,16 @@ async def dispatch_mason_day_start_panels(
     bot: Bot, game: Game, gm: "GameManager"
 ) -> None:
     """شروع هر روز — آپاچی، کابوی، تفنگ روز."""
+    from bot.mason_recruit_delivery import flush_pending_mason_recruit_deliveries
+
+    try:
+        await flush_pending_mason_recruit_deliveries(bot, game, gm)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "mason recruit pending day-start flush failed room=%s", game.room_code
+        )
     await _dispatch_mason_apache_cowboy_panels(bot, game, gm)
     await _dispatch_mason_day_gun_panel(bot, game, gm)
 
@@ -461,12 +484,10 @@ async def _dispatch_mason_apache_cowboy_panels(
     if apache is not None:
         game.mason_apache_day_flow_active = True
         text = build_mason_apache_day_pick_html(game)
-        kb = build_pick_keyboard(
+        kb = build_mason_declare_intent_keyboard(
             game,
             apache.user_id,
-            pick_act=MASON_APACHE_PICK_ACT,
-            players=ms_ap.mason_apache_day_target_pool(game),
-            columns=2,
+            intent_act=MASON_APACHE_DECL_INTENT_ACT,
         )
         await register_mirror_prompt_pair(
             bot,
@@ -484,12 +505,10 @@ async def _dispatch_mason_apache_cowboy_panels(
     if cowboy is not None:
         game.mason_cowboy_day_flow_active = True
         text = build_mason_cowboy_day_pick_html(game)
-        kb = build_pick_keyboard(
+        kb = build_mason_declare_intent_keyboard(
             game,
             cowboy.user_id,
-            pick_act=MASON_COWBOY_PICK_ACT,
-            players=ms_cw.mason_cowboy_day_target_pool(game),
-            columns=2,
+            intent_act=MASON_COWBOY_DECL_INTENT_ACT,
         )
         await register_mirror_prompt_pair(
             bot,
@@ -517,12 +536,14 @@ async def _dispatch_mason_day_gun_panel(
     if holder is None or not holder.is_alive:
         return
     text = build_mason_day_gun_pick_html(game)
-    kb = build_pick_keyboard(
+    kb = build_mason_single_pick_keyboard(
         game,
         holder_uid,
         pick_act=MASON_DAY_GUN_PICK_ACT,
         players=ms_gn.mason_day_gun_shot_pool(game, holder_uid),
-        columns=2,
+        pending_uid=game.mason_day_gun_shot_target_uid,
+        confirm_act=MASON_DAY_GUN_CONFIRM_ACT,
+        back_act=MASON_DAY_GUN_BACK_ACT,
     )
     await register_mirror_prompt_pair(
         bot,
@@ -622,46 +643,97 @@ async def dispatch_mason_day_ability(
         await callback.answer(MASON_DAY_PANEL_INACTIVE_ALERT_FA, show_alert=True)
         return
 
-    if act in (MASON_APACHE_PICK_ACT, MASON_APACHE_CONFIRM_ACT, MASON_APACHE_BACK_ACT):
+    if act in (
+        MASON_APACHE_PICK_ACT,
+        MASON_APACHE_CONFIRM_ACT,
+        MASON_APACHE_BACK_ACT,
+        MASON_APACHE_DECL_INTENT_ACT,
+        MASON_APACHE_DECL_OK_ACT,
+    ):
         apache = ms_ap.find_alive_mason_apache(game)
         if apache is None or apache.user_id != as_uid:
             await callback.answer("آپاچی در بازی نیست.", show_alert=True)
             return
         ui_key = _apache_ui_key(game, as_uid)
-        if act == MASON_APACHE_PICK_ACT:
-            if not ms_ap.mason_apache_day_target_valid(game, tid):
-                await callback.answer("انتخاب نامعتبر.", show_alert=True)
-                return
-            game.mason_apache_day_pending_uid = tid
-            await callback.answer("انتخاب شد؛ تأیید کنید.")
-            confirm_kb = build_confirm_cancel_keyboard(
-                game,
-                as_uid,
-                confirm_act=MASON_APACHE_CONFIRM_ACT,
-                back_act=MASON_APACHE_BACK_ACT,
-                confirm_text="✅ تأیید",
-                back_text="↩️ بازگشت",
-            )
+        if act == MASON_APACHE_DECL_INTENT_ACT:
+            await callback.answer()
             await sync_role_mirror_panel(
                 bot,
                 game,
                 ui_key,
                 as_uid,
-                _build_confirm_html(game, gm, tid, role="🎭 <b>آپاچی</b>"),
-                confirm_kb,
+                f"🎭 <b>آپاچی</b>\n\n{MASON_DECL_CONFIRM_QUESTION}",
+                build_mason_declare_confirm_keyboard(
+                    game,
+                    as_uid,
+                    ok_act=MASON_APACHE_DECL_OK_ACT,
+                    cancel_act=MASON_APACHE_BACK_ACT,
+                ),
+            )
+            return
+        if act == MASON_APACHE_DECL_OK_ACT:
+            await callback.answer()
+            await sync_role_mirror_panel(
+                bot,
+                game,
+                ui_key,
+                as_uid,
+                build_mason_apache_day_pick_html(game),
+                build_mason_single_pick_keyboard(
+                    game,
+                    as_uid,
+                    pick_act=MASON_APACHE_PICK_ACT,
+                    players=ms_ap.mason_apache_day_target_pool(game),
+                    pending_uid=game.mason_apache_day_pending_uid,
+                    confirm_act=MASON_APACHE_CONFIRM_ACT,
+                    back_act=MASON_APACHE_BACK_ACT,
+                    back_always=True,
+                ),
+            )
+            return
+        if act == MASON_APACHE_PICK_ACT:
+            if not ms_ap.mason_apache_day_target_valid(game, tid):
+                await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                return
+            if game.mason_apache_day_pending_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                game.mason_apache_day_pending_uid = None
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                game.mason_apache_day_pending_uid = tid
+                await callback.answer("انتخاب شد.")
+            await sync_role_mirror_panel(
+                bot,
+                game,
+                ui_key,
+                as_uid,
+                build_mason_apache_day_pick_html(game),
+                build_mason_single_pick_keyboard(
+                    game,
+                    as_uid,
+                    pick_act=MASON_APACHE_PICK_ACT,
+                    players=ms_ap.mason_apache_day_target_pool(game),
+                    pending_uid=game.mason_apache_day_pending_uid,
+                    confirm_act=MASON_APACHE_CONFIRM_ACT,
+                    back_act=MASON_APACHE_BACK_ACT,
+                    back_always=True,
+                ),
             )
             return
         if act == MASON_APACHE_BACK_ACT:
             game.mason_apache_day_pending_uid = None
             await callback.answer("بازگشت.")
-            kb = build_pick_keyboard(
-                game,
-                as_uid,
-                pick_act=MASON_APACHE_PICK_ACT,
-                players=ms_ap.mason_apache_day_target_pool(game),
-            )
             await sync_role_mirror_panel(
-                bot, game, ui_key, as_uid, build_mason_apache_day_pick_html(game), kb
+                bot,
+                game,
+                ui_key,
+                as_uid,
+                build_mason_apache_day_pick_html(game),
+                build_mason_declare_intent_keyboard(
+                    game,
+                    as_uid,
+                    intent_act=MASON_APACHE_DECL_INTENT_ACT,
+                ),
             )
             return
         if act == MASON_APACHE_CONFIRM_ACT:
@@ -677,7 +749,13 @@ async def dispatch_mason_day_ability(
             )
         return
 
-    if act in (MASON_COWBOY_PICK_ACT, MASON_COWBOY_CONFIRM_ACT, MASON_COWBOY_BACK_ACT):
+    if act in (
+        MASON_COWBOY_PICK_ACT,
+        MASON_COWBOY_CONFIRM_ACT,
+        MASON_COWBOY_BACK_ACT,
+        MASON_COWBOY_DECL_INTENT_ACT,
+        MASON_COWBOY_DECL_OK_ACT,
+    ):
         if not _day_ability_actor_alive(game, as_uid):
             await callback.answer(MASON_DAY_PANEL_INACTIVE_ALERT_FA, show_alert=True)
             return
@@ -686,40 +764,85 @@ async def dispatch_mason_day_ability(
             await callback.answer("کابوی در بازی نیست.", show_alert=True)
             return
         ui_key = _cowboy_ui_key(game, as_uid)
-        if act == MASON_COWBOY_PICK_ACT:
-            if not ms_cw.mason_cowboy_day_target_valid(game, tid):
-                await callback.answer("انتخاب نامعتبر.", show_alert=True)
-                return
-            game.mason_cowboy_day_pending_uid = tid
-            await callback.answer("انتخاب شد؛ تأیید کنید.")
-            confirm_kb = build_confirm_cancel_keyboard(
-                game,
-                as_uid,
-                confirm_act=MASON_COWBOY_CONFIRM_ACT,
-                back_act=MASON_COWBOY_BACK_ACT,
-                confirm_text="✅ تأیید",
-                back_text="↩️ بازگشت",
-            )
+        if act == MASON_COWBOY_DECL_INTENT_ACT:
+            await callback.answer()
             await sync_role_mirror_panel(
                 bot,
                 game,
                 ui_key,
                 as_uid,
-                _build_confirm_html(game, gm, tid, role="🤠 <b>کابوی</b>"),
-                confirm_kb,
+                f"🤠 <b>کابوی</b>\n\n{MASON_DECL_CONFIRM_QUESTION}",
+                build_mason_declare_confirm_keyboard(
+                    game,
+                    as_uid,
+                    ok_act=MASON_COWBOY_DECL_OK_ACT,
+                    cancel_act=MASON_COWBOY_BACK_ACT,
+                ),
+            )
+            return
+        if act == MASON_COWBOY_DECL_OK_ACT:
+            await callback.answer()
+            await sync_role_mirror_panel(
+                bot,
+                game,
+                ui_key,
+                as_uid,
+                build_mason_cowboy_day_pick_html(game),
+                build_mason_single_pick_keyboard(
+                    game,
+                    as_uid,
+                    pick_act=MASON_COWBOY_PICK_ACT,
+                    players=ms_cw.mason_cowboy_day_target_pool(game),
+                    pending_uid=game.mason_cowboy_day_pending_uid,
+                    confirm_act=MASON_COWBOY_CONFIRM_ACT,
+                    back_act=MASON_COWBOY_BACK_ACT,
+                    back_always=True,
+                ),
+            )
+            return
+        if act == MASON_COWBOY_PICK_ACT:
+            if not ms_cw.mason_cowboy_day_target_valid(game, tid):
+                await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                return
+            if game.mason_cowboy_day_pending_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                game.mason_cowboy_day_pending_uid = None
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                game.mason_cowboy_day_pending_uid = tid
+                await callback.answer("انتخاب شد.")
+            await sync_role_mirror_panel(
+                bot,
+                game,
+                ui_key,
+                as_uid,
+                build_mason_cowboy_day_pick_html(game),
+                build_mason_single_pick_keyboard(
+                    game,
+                    as_uid,
+                    pick_act=MASON_COWBOY_PICK_ACT,
+                    players=ms_cw.mason_cowboy_day_target_pool(game),
+                    pending_uid=game.mason_cowboy_day_pending_uid,
+                    confirm_act=MASON_COWBOY_CONFIRM_ACT,
+                    back_act=MASON_COWBOY_BACK_ACT,
+                    back_always=True,
+                ),
             )
             return
         if act == MASON_COWBOY_BACK_ACT:
             game.mason_cowboy_day_pending_uid = None
             await callback.answer("بازگشت.")
-            kb = build_pick_keyboard(
-                game,
-                as_uid,
-                pick_act=MASON_COWBOY_PICK_ACT,
-                players=ms_cw.mason_cowboy_day_target_pool(game),
-            )
             await sync_role_mirror_panel(
-                bot, game, ui_key, as_uid, build_mason_cowboy_day_pick_html(game), kb
+                bot,
+                game,
+                ui_key,
+                as_uid,
+                build_mason_cowboy_day_pick_html(game),
+                build_mason_declare_intent_keyboard(
+                    game,
+                    as_uid,
+                    intent_act=MASON_COWBOY_DECL_INTENT_ACT,
+                ),
             )
             return
         if act == MASON_COWBOY_CONFIRM_ACT:
@@ -756,36 +879,48 @@ async def dispatch_mason_day_ability(
             ):
                 await callback.answer("انتخاب نامعتبر.", show_alert=True)
                 return
-            game.mason_day_gun_shot_target_uid = tid
-            await callback.answer("انتخاب شد؛ تأیید کنید.")
-            confirm_kb = build_confirm_cancel_keyboard(
-                game,
-                as_uid,
-                confirm_act=MASON_DAY_GUN_CONFIRM_ACT,
-                back_act=MASON_DAY_GUN_BACK_ACT,
-                confirm_text="✅ تأیید",
-                back_text="↩️ بازگشت",
-            )
+            if game.mason_day_gun_shot_target_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                game.mason_day_gun_shot_target_uid = None
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                game.mason_day_gun_shot_target_uid = tid
+                await callback.answer("انتخاب شد.")
             await sync_role_mirror_panel(
                 bot,
                 game,
                 ui_key,
                 as_uid,
-                _build_confirm_html(game, gm, tid, role="🔫 <b>تفنگ روز</b>"),
-                confirm_kb,
+                build_mason_day_gun_pick_html(game),
+                build_mason_single_pick_keyboard(
+                    game,
+                    as_uid,
+                    pick_act=MASON_DAY_GUN_PICK_ACT,
+                    players=ms_gn.mason_day_gun_shot_pool(game, as_uid),
+                    pending_uid=game.mason_day_gun_shot_target_uid,
+                    confirm_act=MASON_DAY_GUN_CONFIRM_ACT,
+                    back_act=MASON_DAY_GUN_BACK_ACT,
+                ),
             )
             return
         if act == MASON_DAY_GUN_BACK_ACT:
             game.mason_day_gun_shot_target_uid = None
             await callback.answer("بازگشت.")
-            kb = build_pick_keyboard(
-                game,
-                as_uid,
-                pick_act=MASON_DAY_GUN_PICK_ACT,
-                players=ms_gn.mason_day_gun_shot_pool(game, as_uid),
-            )
             await sync_role_mirror_panel(
-                bot, game, ui_key, as_uid, build_mason_day_gun_pick_html(game), kb
+                bot,
+                game,
+                ui_key,
+                as_uid,
+                build_mason_day_gun_pick_html(game),
+                build_mason_single_pick_keyboard(
+                    game,
+                    as_uid,
+                    pick_act=MASON_DAY_GUN_PICK_ACT,
+                    players=ms_gn.mason_day_gun_shot_pool(game, as_uid),
+                    pending_uid=None,
+                    confirm_act=MASON_DAY_GUN_CONFIRM_ACT,
+                    back_act=MASON_DAY_GUN_BACK_ACT,
+                ),
             )
             return
         if act == MASON_DAY_GUN_CONFIRM_ACT:

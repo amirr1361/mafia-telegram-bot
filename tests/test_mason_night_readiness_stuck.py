@@ -9,6 +9,7 @@ from bot.bazpors_narrator import NIGHT_START
 from bot.game import GameManager
 from bot.mason_night_role import (
     MASON_NO_NIGHT_PICK_WAIT_TEXT,
+    MSS_CONFIRM,
     MSS_NONE,
     MSC_INFO_OK,
     dispatch_mason_night_role,
@@ -108,6 +109,9 @@ class MasonSniperCommanderChainTests(unittest.IsolatedAsyncioTestCase):
             "bot.mason_night_role.register_mirror_prompt_pair",
             new=AsyncMock(),
         ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
             "bot.mason_night_role.update_mirror_prompt_pair",
             new=AsyncMock(),
         ), patch(
@@ -122,6 +126,16 @@ class MasonSniperCommanderChainTests(unittest.IsolatedAsyncioTestCase):
                 as_uid=50,
                 actor_uid=50,
                 act=MSS_NONE,
+                tid=0,
+            )
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=50,
+                actor_uid=50,
+                act=MSS_CONFIRM,
                 tid=0,
             )
             await dispatch_mason_night_role(

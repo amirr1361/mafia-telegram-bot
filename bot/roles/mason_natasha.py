@@ -55,7 +55,13 @@ def commit_mason_natasha_target(
 
 
 def _player_display_name(player: Player) -> str:
-    return player.full_name or str(player.user_id)
+    from bot.app_state import custom_display_name
+
+    return (
+        custom_display_name(player.user_id)
+        or player.full_name
+        or str(player.user_id)
+    )
 
 
 def mason_natasha_silence_public_message(target: Player) -> str:

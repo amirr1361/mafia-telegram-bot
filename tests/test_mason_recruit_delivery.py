@@ -6,7 +6,12 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.game import GameManager, is_synthetic_player_uid
-from bot.mason_night_role import MSM_PICK, MSM_TAILOR, dispatch_mason_night_role
+from bot.mason_night_role import (
+    MSM_CONFIRM,
+    MSM_PICK,
+    MSM_TAILOR,
+    dispatch_mason_night_role,
+)
 from bot.models import Player, Role
 from bot.observer_delivery import observer_player_copy_prefix
 from bot.roles import mason_fraternity as ms_mf
@@ -62,6 +67,12 @@ class MasonRecruitDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "bot.mason_night_role.finalize_no_host_role_pick_message",
             new=AsyncMock(),
         ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
         ):
@@ -74,6 +85,19 @@ class MasonRecruitDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 actor_uid=mason_uid,
                 act=MSM_TAILOR,
                 tid=tailor_uid,
+            )
+            # انتخاب موقت — جذب فقط پس از تأیید نهایی.
+            self.assertFalse(game.mason_night_mason_confirmed)
+            self.assertEqual(delivered, [])
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=mason_uid,
+                actor_uid=mason_uid,
+                act=MSM_CONFIRM,
+                tid=0,
             )
         return delivered
 
@@ -132,6 +156,12 @@ class MasonRecruitDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "bot.mason_night_role.finalize_no_host_role_pick_message",
             new=AsyncMock(),
         ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
         ):
@@ -144,6 +174,19 @@ class MasonRecruitDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 actor_uid=mason.user_id,
                 act=MSM_TAILOR,
                 tid=tailor.user_id,
+            )
+            # انتخاب موقت — جذب فقط پس از تأیید نهایی.
+            self.assertFalse(game.mason_night_mason_confirmed)
+            self.assertFalse(ms_mf.is_mason_team_member(game, tailor))
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=mason.user_id,
+                actor_uid=mason.user_id,
+                act=MSM_CONFIRM,
+                tid=0,
             )
 
         player_msgs = [text for uid, text in sends if uid == tailor.user_id]
@@ -179,6 +222,12 @@ class MasonRecruitDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "bot.mason_night_role.finalize_no_host_role_pick_message",
             new=AsyncMock(),
         ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
         ):
@@ -191,6 +240,18 @@ class MasonRecruitDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 actor_uid=mason.user_id,
                 act=MSM_TAILOR,
                 tid=tailor.user_id,
+            )
+            # انتخاب موقت — جذب فقط پس از تأیید نهایی.
+            self.assertFalse(game.mason_night_mason_confirmed)
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=mason.user_id,
+                actor_uid=mason.user_id,
+                act=MSM_CONFIRM,
+                tid=0,
             )
 
         self.assertFalse(any(uid == syn_tailor for uid, _ in sends))
@@ -221,6 +282,12 @@ class MasonRecruitDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "bot.mason_night_role.finalize_no_host_role_pick_message",
             new=AsyncMock(),
         ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
         ):
@@ -233,6 +300,18 @@ class MasonRecruitDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 actor_uid=mason.user_id,
                 act=MSM_PICK,
                 tid=town.user_id,
+            )
+            # انتخاب موقت — پیام عضویت فقط پس از تأیید نهایی.
+            self.assertEqual(delivered, [])
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=mason.user_id,
+                actor_uid=mason.user_id,
+                act=MSM_CONFIRM,
+                tid=0,
             )
 
         self.assertEqual(delivered, [(20, delivered[0][1])])

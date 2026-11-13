@@ -42,7 +42,7 @@ from bot.observer_delivery import (
     update_mirror_prompt_pair,
 )
 
-from bot.no_host_role_pick_common import player_button_name
+from bot.no_host_role_pick_common import apply_bazpors_panel_styles, player_button_name
 from bot.room_mode import is_mason_scenario, is_mozakere_scenario
 
 if TYPE_CHECKING:
@@ -195,29 +195,50 @@ def _shot_pick_keyboard(
             row = []
     if row:
         rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    kb = apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(inline_keyboard=rows),
+        pick_acts={"msk"},
+        selected_uids=(
+            [game.no_host_mafia_shot_pending_uid]
+            if game.no_host_mafia_shot_pending_uid is not None
+            else []
+        ),
+        selected_style="danger" if is_mason_scenario(game) else None,
+    )
+    if is_mozakere_scenario(game) or game.scenario_name == "bazpors":
+        from bot.no_host_role_pick_common import with_inline_confirm_row
+
+        # تأیید سبز از رندر اولیه — شلیک فقط با تأیید نهایی ثبت می‌شود.
+        kb = with_inline_confirm_row(game, mafia_uid, kb, confirm_act="msc")
+    return kb
 
 
 def _shot_confirm_keyboard(game: Game, mafia_uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔹 بله، تأیید انتخاب",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="msc", as_uid=mafia_uid
-                    ).pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔹 بازگشت و تصحیح انتخاب",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="msb", as_uid=mafia_uid
-                    ).pack(),
-                )
-            ],
-        ]
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔹 بله، تأیید انتخاب",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act="msc", as_uid=mafia_uid
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🔹 بازگشت و تصحیح انتخاب",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act="msb", as_uid=mafia_uid
+                        ).pack(),
+                    )
+                ],
+            ]
+        ),
+        ok_acts={"msc", "msb"},
+        selected_style="danger" if is_mason_scenario(game) else None,
     )
 
 
@@ -462,9 +483,42 @@ async def dispatch_no_host_mafia_shot(
         if tid not in game.players or not game.players[tid].is_alive:
             await callback.answer("انتخاب نامعتبر.", show_alert=True)
             return
+        if (
+            is_mozakere_scenario(game) or game.scenario_name == "bazpors"
+        ) and game.no_host_mafia_shot_pending_uid == tid:
+            # Pash—زدن دوباره روی انتخاب فعلی = لغو انتخاب (بازگشت به لیست).
+            game.no_host_mafia_shot_pending_uid = None
+            game.no_host_mafia_shot_awaiting_confirm = False
+            await callback.answer("انتخاب لغو شد.")
+            pick_text = build_no_host_mafia_shot_pick_html(game)
+            pick_kb = _shot_pick_keyboard(game, mafia_uid, gm)
+            await _sync_mafia_shot_mirror_panel(
+                bot, game, mafia_uid, pick_text, pick_kb
+            )
+            return
         game.no_host_mafia_shot_pending_uid = tid
         game.no_host_mafia_shot_awaiting_confirm = True
         await callback.answer("انتخاب شد؛ تأیید کنید.")
+        if is_mozakere_scenario(game) or game.scenario_name == "bazpors":
+            # مذاکره/بازپرس — پنل انتخاب با انتخاب قرمز + تأیید سبز در همان صفحه.
+            from bot.no_host_role_pick_common import (
+                append_pending_selection_line,
+            )
+
+            tag = html.escape(
+                gm.format_player_tag(game.players.get(tid))[:40]
+            )
+            pick_text = append_pending_selection_line(
+                build_no_host_mafia_shot_pick_html(game),
+                [f"🔫 انتخاب فعلی: <b>{tag}</b>"],
+            )
+            # ردیف «تأیید انتخاب» از قبل داخل _shot_pick_keyboard اضافه
+            # می‌شود — دوباره اضافه نشود (باگ دکمهٔ تأیید تکراری، اتاق ۲۶).
+            pick_kb = _shot_pick_keyboard(game, mafia_uid, gm)
+            await _sync_mafia_shot_mirror_panel(
+                bot, game, mafia_uid, pick_text, pick_kb
+            )
+            return
         confirm_text = build_no_host_mafia_shot_confirm_html(game, gm, tid)
         confirm_kb = _shot_confirm_keyboard(game, mafia_uid)
         await _sync_mafia_shot_mirror_panel(

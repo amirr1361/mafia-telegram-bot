@@ -23,6 +23,7 @@ from bot.bazpors_narrator import (
 from bot.no_host_mafia_win import no_host_eliminate_and_maybe_end_game, no_host_maybe_end_on_faction_win
 from bot.game import is_mafia_team, is_synthetic_player_uid
 from bot.models import Game
+from bot.no_host_role_pick_common import apply_bazpors_panel_styles
 from bot.roles.registry import find_alive_role_holder
 from bot.observer_delivery import (
     PlayerMirrorCb,
@@ -131,40 +132,92 @@ def build_interrog_wait_ack_html() -> str:
 
 
 def _wait_ok_keyboard(game: Game, uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ اوکی",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="ihok", as_uid=uid
-                    ).pack(),
-                )
+    return apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ اوکی",
+                        callback_data=PlayerMirrorCb(
+                            code=game.room_code, act="ihok", as_uid=uid
+                        ).pack(),
+                    )
+                ]
             ]
-        ]
+        ),
+        ok_acts={"ihok"},
     )
 
 
+def _interrog_day_pending_decision_line(game: Game) -> str:
+    """Current-selection line for the interrogator decision panel (FA UI)."""
+    pending = game.no_host_interrog_day_pending_decision
+    if pending == "continue":
+        return "🔘 انتخاب فعلی: <b>بازپرسی ادامه پیدا کند</b>"
+    if pending == "dissolve":
+        return "🔘 انتخاب فعلی: <b>بازپرسی منحل شود</b>"
+    return "🔘 انتخاب فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
+
+
+def _append_pending_to_interrog_html(game: Game, pending_line: str) -> str:
+    from bot.no_host_role_pick_common import append_pending_selection_line
+
+    return append_pending_selection_line(
+        build_interrog_interrogator_html(),
+        [pending_line],
+    )
+    pending = game.no_host_interrog_day_pending_decision
+    if pending == "continue":
+        return "🔘 انتخاب فعلی: <b>بازپرسی ادامه پیدا کند</b>"
+    if pending == "dissolve":
+        return "🔘 انتخاب فعلی: <b>بازپرسی منحل شود</b>"
+    return "🔘 انتخاب فعلی: <i>هنوز انتخابی ثبت نشده است</i>"
+
+
 def _interrogator_keyboard(game: Game, intr_uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔘 بازپرسی ادامه پیدا کند",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="ihco", as_uid=intr_uid
-                    ).pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔘 بازپرسی منحل شود",
-                    callback_data=PlayerMirrorCb(
-                        code=game.room_code, act="ihdi", as_uid=intr_uid
-                    ).pack(),
-                )
-            ],
-        ]
+    """Decision panel: options blue, pending choice red, one green confirm.
+
+    Exactly one green «✅ تأیید انتخاب» (ihck) is visible from the initial
+    rendering; the decision commits only on that confirm.
+    """
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="🔘 بازپرسی ادامه پیدا کند",
+                callback_data=PlayerMirrorCb(
+                    code=game.room_code, act="ihco", as_uid=intr_uid
+                ).pack(),
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🔘 بازپرسی منحل شود",
+                callback_data=PlayerMirrorCb(
+                    code=game.room_code, act="ihdi", as_uid=intr_uid
+                ).pack(),
+            )
+        ],
+    ]
+    selected_acts: tuple[str, ...] = ()
+    if game.no_host_interrog_day_pending_decision == "continue":
+        selected_acts = ("ihco",)
+    elif game.no_host_interrog_day_pending_decision == "dissolve":
+        selected_acts = ("ihdi",)
+    base = apply_bazpors_panel_styles(
+        game,
+        InlineKeyboardMarkup(inline_keyboard=rows),
+        ok_acts={"ihco", "ihdi"},
+        selected_acts=selected_acts,
+    )
+    from bot.no_host_role_pick_common import with_inline_confirm_row
+
+    return with_inline_confirm_row(
+        game,
+        intr_uid,
+        base,
+        confirm_act="ihck",
+        confirm_text="✅ تأیید انتخاب",
     )
 
 
@@ -191,10 +244,12 @@ def reset_no_host_interrog_day_state(game: Game) -> None:
     game.no_host_interrog_day_phase = None
     game.no_host_interrog_day_session_signature = None
     game.no_host_interrog_day_assistant_wait_sent = False
+    game.no_host_interrog_day_vote_committed = False
     clear_observer_narrator_mirror_ref(game)
     game.no_host_interrog_day_ok_uids = []
     game.no_host_interrog_day_decision = None
     game.no_host_interrog_day_pending_vote = None
+    game.no_host_interrog_day_pending_decision = None
 
 
 def should_enter_no_host_interrog_day(game: Game) -> bool:
@@ -213,6 +268,8 @@ def enter_no_host_interrog_day_step(game: Game) -> None:
     game.bazpors_narrator_step = NO_HOST_INTERROG_DAY
     game.no_host_interrog_day_ok_uids = []
     game.no_host_interrog_day_pending_vote = None
+    game.no_host_interrog_day_pending_decision = None
+    game.no_host_interrog_day_vote_committed = False
     if _interrogator_alive(game):
         game.no_host_interrog_day_phase = IH_PHASE_ASSIST
         game.no_host_interrog_day_decision = None
@@ -291,6 +348,25 @@ def build_no_host_interrog_day_assistant_panel(
             "را مشخص کنید.\n\n"
             "⚠️ توجه: در صورت تأیید خروج بازیکن از بازی، ساید (تیم) او اعلام خواهد شد."
         )
+        pending = game.no_host_interrog_day_pending_vote
+        if pending == "tie":
+            pending_line = (
+                "🗳️ نتیجهٔ انتخاب‌شده: <b>آرا مساوی شد و کسی از بازی خارج نمی‌شود</b>"
+            )
+        elif pending is not None and pending in game.players:
+            pending_line = (
+                "🗳️ نتیجهٔ انتخاب‌شده: <b>خروج "
+                + _player_seat_name(game, gm, pending)
+                + "</b>"
+            )
+        else:
+            pending_line = (
+                "🗳️ نتیجهٔ انتخاب‌شده: <i>هنوز انتخابی ثبت نشده است</i>"
+            )
+        from bot.no_host_role_pick_common import append_pending_selection_line
+
+        body = append_pending_selection_line(body, [pending_line])
+        is_bazpors = game.scenario_name == "bazpors"
         rows: list[list[InlineKeyboardButton]] = [
             [
                 InlineKeyboardButton(
@@ -298,6 +374,8 @@ def build_no_host_interrog_day_assistant_panel(
                     callback_data=BazporsNarrCb(
                         code=code, act="ih_vtie", tid=0
                     ).pack(),
+                    style="danger" if pending == "tie" else
+                    ("primary" if is_bazpors else None),
                 )
             ]
         ]
@@ -313,9 +391,25 @@ def build_no_host_interrog_day_assistant_panel(
                         callback_data=BazporsNarrCb(
                             code=code, act="ih_velim", tid=p.user_id
                         ).pack(),
+                        style=(
+                            "danger"
+                            if pending == p.user_id
+                            else ("primary" if is_bazpors else None)
+                        ),
                     )
                 ]
             )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ تأیید انتخاب",
+                    callback_data=BazporsNarrCb(
+                        code=code, act="ih_vok", tid=0
+                    ).pack(),
+                    style="success" if is_bazpors else None,
+                )
+            ]
+        )
         return body, InlineKeyboardMarkup(inline_keyboard=rows)
 
     if phase == IH_PHASE_VOTE_CONFIRM:
@@ -337,6 +431,7 @@ def build_no_host_interrog_day_assistant_panel(
                         callback_data=BazporsNarrCb(
                             code=code, act="ih_vok", tid=0
                         ).pack(),
+                        style="success" if game.scenario_name == "bazpors" else None,
                     )
                 ],
                 [
@@ -624,8 +719,11 @@ def process_no_host_interrog_day_narrator_cb(
     if act == "ih_vtie":
         if phase != IH_PHASE_VOTE:
             return "نامعتبر."
-        game.no_host_interrog_day_pending_vote = "tie"
-        game.no_host_interrog_day_phase = IH_PHASE_VOTE_CONFIRM
+        if game.no_host_interrog_day_pending_vote == "tie":
+            # Pressing the pending outcome again cancels the tentative pick.
+            game.no_host_interrog_day_pending_vote = None
+        else:
+            game.no_host_interrog_day_pending_vote = "tie"
         return None
 
     if act == "ih_velim":
@@ -634,22 +732,34 @@ def process_no_host_interrog_day_narrator_cb(
         pool = {p.user_id for p in _interrog_day_vote_pool(game)}
         if tid not in pool:
             return "نامعتبر."
-        game.no_host_interrog_day_pending_vote = tid
-        game.no_host_interrog_day_phase = IH_PHASE_VOTE_CONFIRM
+        if game.no_host_interrog_day_pending_vote == tid:
+            game.no_host_interrog_day_pending_vote = None
+        else:
+            game.no_host_interrog_day_pending_vote = tid
         return None
 
     if act == "ih_vback":
-        if phase != IH_PHASE_VOTE_CONFIRM:
+        if phase not in (IH_PHASE_VOTE, IH_PHASE_VOTE_CONFIRM):
             return "نامعتبر."
         game.no_host_interrog_day_pending_vote = None
         game.no_host_interrog_day_phase = IH_PHASE_VOTE
         return None
 
     if act == "ih_vok":
-        if phase != IH_PHASE_VOTE_CONFIRM:
+        if phase not in (IH_PHASE_VOTE, IH_PHASE_VOTE_CONFIRM):
+            return "نامعتبر."
+        if game.no_host_interrog_day_vote_committed:
+            # Idempotency: a duplicate / stale «تأیید انتخاب» press (or a
+            # racing second callback delivery) must not re-apply the
+            # result — Room 97 regression — and must never re-enter the
+            # day-start workflow a second time.
             return "نامعتبر."
         if game.no_host_interrog_day_pending_vote is None:
             return "خطا."
+        # Latch BEFORE the async apply runs: the apply path awaits
+        # broadcasts, so a concurrent second callback could otherwise pass
+        # the phase/pending guards above and double-run the day start.
+        game.no_host_interrog_day_vote_committed = True
         return None
 
     return "نامعتبر."
@@ -733,7 +843,7 @@ def no_host_interrog_vote_hunter_chain_alert(
 def no_host_interrog_day_act_active(game: Game, act: str) -> bool:
     if game.bazpors_narrator_step != NO_HOST_INTERROG_DAY:
         return False
-    return act in ("ihok", "ihco", "ihdi")
+    return act in ("ihok", "ihco", "ihdi", "ihck")
 
 
 def _player_may_act(game: Game, actor_uid: int, as_uid: int) -> bool:
@@ -806,10 +916,47 @@ async def dispatch_no_host_interrog_day_player(
         if game.no_host_interrog_day_decision is not None:
             await callback.answer("قبلاً ثبت شده است.", show_alert=True)
             return
-        game.no_host_interrog_day_decision = (
-            "continue" if act == "ihco" else "dissolve"
+        pending = "continue" if act == "ihco" else "dissolve"
+        if game.no_host_interrog_day_pending_decision == pending:
+            # Pressing the pending option again cancels the tentative pick.
+            game.no_host_interrog_day_pending_decision = None
+            await callback.answer("انتخاب لغو شد.")
+        else:
+            game.no_host_interrog_day_pending_decision = pending
+            await callback.answer("انتخاب شد؛ تأیید کنید.")
+        await update_mirror_prompt_pair(
+            bot,
+            game,
+            _interrogator_ui_key(game, intr_uid),
+            _append_pending_to_interrog_html(
+                game,
+                _interrog_day_pending_decision_line(game),
+            ),
+            _interrogator_keyboard(game, intr_uid),
+            assistant_uid=intr_uid,
+            parse_mode="HTML",
         )
-        label = "ادامه بازپرسی" if act == "ihco" else "انحلال بازپرسی"
+        return
+
+    if act == "ihck":
+        if intr_uid is None or as_uid != intr_uid:
+            await callback.answer("فقط بازپرس این انتخاب را دارد.", show_alert=True)
+            return
+        if not _player_may_act(game, actor_uid, as_uid):
+            await callback.answer("فقط بازپرس می‌تواند انتخاب کند.", show_alert=True)
+            return
+        if game.no_host_interrog_day_decision is not None:
+            await callback.answer("قبلاً ثبت شده است.", show_alert=True)
+            return
+        pending = game.no_host_interrog_day_pending_decision
+        if pending is None:
+            await callback.answer(
+                "ابتدا یکی از دو گزینه را انتخاب کنید.",
+                show_alert=True,
+            )
+            return
+        game.no_host_interrog_day_decision = pending
+        label = "ادامه بازپرسی" if pending == "continue" else "انحلال بازپرسی"
         await callback.answer(f"ثبت شد: {label}.")
         await update_mirror_prompt_pair(
             bot,

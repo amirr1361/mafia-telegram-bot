@@ -7,9 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot.game import GameManager
 from bot.mason_night_role import (
+    MGD_CONFIRM,
     MGD_PICK,
+    MSD_CONFIRM,
     MSD_PICK,
     MSD_DONE,
+    MSS_CONFIRM,
     MSS_NONE,
     MSM_NONE,
     build_mason_night_finalized_selection_label,
@@ -142,6 +145,12 @@ class MasonNightFinalizedDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "bot.mason_night_role.finalize_no_host_role_pick_message",
             side_effect=_capture_finalize,
         ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
         ):
@@ -154,6 +163,18 @@ class MasonNightFinalizedDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 actor_uid=30,
                 act=MGD_PICK,
                 tid=20,
+            )
+            # انتخاب موقت — بدون نهایی‌سازی و بدون مصرف قابلیت.
+            self.assertEqual(len(captured), 0)
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=30,
+                actor_uid=30,
+                act=MGD_CONFIRM,
+                tid=0,
             )
         self.assertEqual(len(captured), 1)
         self.assertIn("Target", captured[0])
@@ -180,6 +201,12 @@ class MasonNightFinalizedDeliveryTests(unittest.IsolatedAsyncioTestCase):
             "bot.no_host_night_common.update_mirror_prompt_pair",
             side_effect=_capture_update,
         ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
         ):
@@ -192,6 +219,18 @@ class MasonNightFinalizedDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 actor_uid=30,
                 act=MGD_PICK,
                 tid=20,
+            )
+            # انتخاب موقت — نهایی‌سازی فقط با تأیید.
+            self.assertEqual(len(bodies), 0)
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=30,
+                actor_uid=30,
+                act=MGD_CONFIRM,
+                tid=0,
             )
         self.assertEqual(len(bodies), 1)
         self.assertIn("Target", bodies[0])
@@ -218,6 +257,12 @@ class MasonNightFinalizedDeliveryTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
         ):
             await dispatch_mason_night_role(
                 cb,
@@ -227,6 +272,16 @@ class MasonNightFinalizedDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 as_uid=40,
                 actor_uid=40,
                 act=MSD_DONE,
+                tid=0,
+            )
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=40,
+                actor_uid=40,
+                act=MSD_CONFIRM,
                 tid=0,
             )
         self.assertEqual(captured, ["انتخابی ندارم"])
@@ -254,6 +309,12 @@ class MasonNightFinalizedDeliveryTests(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "bot.mason_night_ready.maybe_finish_mason_parallel_night",
             new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.register_mirror_prompt_pair",
+            new=AsyncMock(),
+        ), patch(
+            "bot.mason_night_role.sync_role_mirror_panel",
+            new=AsyncMock(),
         ):
             await dispatch_mason_night_role(
                 cb,
@@ -263,6 +324,16 @@ class MasonNightFinalizedDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 as_uid=50,
                 actor_uid=50,
                 act=MSS_NONE,
+                tid=0,
+            )
+            await dispatch_mason_night_role(
+                cb,
+                bot,
+                game,
+                gm,
+                as_uid=50,
+                actor_uid=50,
+                act=MSS_CONFIRM,
                 tid=0,
             )
         self.assertEqual(captured, ["بدون شلیک"])

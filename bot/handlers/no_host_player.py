@@ -53,6 +53,14 @@ from bot.mason_player_role_pick import (
     parse_role_pick_callback_data as parse_mason_role_pick,
     parse_role_pick_taken_callback_data as parse_mason_role_pick_taken,
 )
+from bot.nam10.roles_player_pick import (
+    ROLE_PICK_CB_PREFIX as NAM10_ROLE_PICK_CB_PREFIX,
+    ROLE_PICK_TAKEN_CB_PREFIX as NAM10_ROLE_PICK_TAKEN_CB_PREFIX,
+    handle_player_role_pick_callback as handle_nam10_role_pick,
+    handle_player_role_pick_taken_callback as handle_nam10_role_pick_taken,
+    parse_role_pick_callback_data as parse_nam10_role_pick,
+    parse_role_pick_taken_callback_data as parse_nam10_role_pick_taken,
+)
 from bot.no_host_citizen_night import (
     dispatch_no_host_citizen_night,
     no_host_citizen_act_active,
@@ -259,6 +267,50 @@ async def cb_mason_player_role_pick(
     await handle_mason_role_pick(callback, bot, game, number)
 
 
+@router.callback_query(
+    lambda c: c.data is not None
+    and c.data.startswith(f"{NAM10_ROLE_PICK_TAKEN_CB_PREFIX}:")
+)
+async def cb_nam10_player_role_pick_taken(
+    callback: CallbackQuery,
+    bot: Bot,
+) -> None:
+    if not callback.from_user:
+        return
+    packed = parse_nam10_role_pick_taken(callback.data or "")
+    if packed is None:
+        await callback.answer("دکمه نامعتبر.", show_alert=True)
+        return
+    room_code, number = packed
+    game = manager.get_game(room_code)
+    if not game:
+        await callback.answer("اتاق دیگر فعال نیست.", show_alert=True)
+        return
+    await handle_nam10_role_pick_taken(callback, bot, game, number)
+
+
+@router.callback_query(
+    lambda c: c.data is not None
+    and c.data.startswith(f"{NAM10_ROLE_PICK_CB_PREFIX}:")
+)
+async def cb_nam10_player_role_pick(
+    callback: CallbackQuery,
+    bot: Bot,
+) -> None:
+    if not callback.from_user:
+        return
+    packed = parse_nam10_role_pick(callback.data or "")
+    if packed is None:
+        await callback.answer("دکمه نامعتبر.", show_alert=True)
+        return
+    room_code, number = packed
+    game = manager.get_game(room_code)
+    if not game:
+        await callback.answer("اتاق دیگر فعال نیست.", show_alert=True)
+        return
+    await handle_nam10_role_pick(callback, bot, game, number)
+
+
 @router.callback_query(NoHostDay1DefenseCb.filter())
 async def cb_no_host_day1_defense(
     callback: CallbackQuery,
@@ -275,6 +327,13 @@ async def cb_no_host_day1_defense(
         or is_russian_mafia_host_helper_room(game)
     ):
         await callback.answer("این دکمه برای این اتاق نیست.", show_alert=True)
+        return
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if is_namayande10_no_host_room(game):
+        from bot.nam10.dayflow import dispatch_nam10_day1_defense_cb
+
+        await dispatch_nam10_day1_defense_cb(callback, bot, game, callback_data)
         return
     assistant_uid = game.bot_assistant_user_id
 
@@ -333,6 +392,13 @@ async def cb_no_host_intro_night_start(
     game = manager.get_game(callback_data.code)
     if not game or not no_host_bot_assistant_flow_enabled(game):
         await callback.answer("این دکمه برای این اتاق نیست.", show_alert=True)
+        return
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if is_namayande10_no_host_room(game):
+        from bot.nam10.dayflow import dispatch_nam10_intro_night_cb
+
+        await dispatch_nam10_intro_night_cb(callback, bot, game, callback_data)
         return
     assistant_uid = game.bot_assistant_user_id
     if assistant_uid is None:
@@ -394,6 +460,86 @@ async def cb_mason_helper(
     )
 
 
+@router.callback_query(lambda c: c.data is not None and c.data.startswith("mzh:"))
+async def cb_mozakere_helper(
+    callback: CallbackQuery,
+    bot: Bot,
+) -> None:
+    from bot.mozakere_force_finish_night import (
+        MozakereHelperCb,
+        handle_mozakere_helper_action,
+    )
+    from bot.room_mode import is_mozakere_scenario
+
+    if not callback.from_user or callback.message is None:
+        return
+    try:
+        data = MozakereHelperCb.unpack(callback.data or "")
+    except ValueError:
+        return
+    game = manager.get_game(data.code)
+    if not game or not is_mozakere_scenario(game) or not no_host_bot_assistant_flow_enabled(game):
+        await callback.answer("این دکمه برای این اتاق نیست.", show_alert=True)
+        return
+    assistant_uid = game.bot_assistant_user_id
+    if assistant_uid is None:
+        await callback.answer("کمک‌کننده ربات مشخص نیست.", show_alert=True)
+        return
+    if callback.from_user.id != assistant_uid:
+        await callback.answer("فقط کمک‌کننده ربات.", show_alert=True)
+        return
+    await handle_mozakere_helper_action(
+        callback,
+        bot,
+        game,
+        manager,
+        assistant_uid=assistant_uid,
+        actor_uid=callback.from_user.id,
+        act=data.act,
+        kind=data.kind,
+    )
+
+
+@router.callback_query(lambda c: c.data is not None and c.data.startswith("bzh:"))
+async def cb_bazpors_helper(
+    callback: CallbackQuery,
+    bot: Bot,
+) -> None:
+    from bot.bazpors_force_finish_night import (
+        BazporsHelperCb,
+        handle_bazpors_helper_action,
+    )
+    from bot.room_mode import is_bazpors_no_host_room
+
+    if not callback.from_user or callback.message is None:
+        return
+    try:
+        data = BazporsHelperCb.unpack(callback.data or "")
+    except ValueError:
+        return
+    game = manager.get_game(data.code)
+    if not game or not is_bazpors_no_host_room(game) or not no_host_bot_assistant_flow_enabled(game):
+        await callback.answer("این دکمه برای این اتاق نیست.", show_alert=True)
+        return
+    assistant_uid = game.bot_assistant_user_id
+    if assistant_uid is None:
+        await callback.answer("کمک‌کننده ربات مشخص نیست.", show_alert=True)
+        return
+    if callback.from_user.id != assistant_uid:
+        await callback.answer("فقط کمک‌کننده ربات.", show_alert=True)
+        return
+    await handle_bazpors_helper_action(
+        callback,
+        bot,
+        game,
+        manager,
+        assistant_uid=assistant_uid,
+        actor_uid=callback.from_user.id,
+        act=data.act,
+        kind=data.kind,
+    )
+
+
 @router.callback_query(lambda c: c.data is not None and c.data.startswith("pmr:"))
 async def player_mirror_cb(
     callback: CallbackQuery,
@@ -412,6 +558,46 @@ async def player_mirror_cb(
     as_uid = callback_data.as_uid
     act = callback_data.act
     room = game.room_code
+
+    from bot.room_mode import is_namayande10_no_host_room
+
+    if is_namayande10_no_host_room(game):
+        from bot.nam10.player_mirror import dispatch_namayande10_mirror
+
+        await dispatch_namayande10_mirror(
+            callback, bot, game, callback_data=callback_data
+        )
+        return
+
+    from bot.room_mode import is_mozakere_scenario
+
+    if is_mozakere_scenario(game):
+        # اتمام اجباری شب: اکت‌های شبانهٔ دیررس رد می‌شوند.
+        from bot.mozakere_force_finish_night import (
+            MOZAKERE_NIGHT_PHASE_ENDED_TEXT,
+            mozakere_night_act_is_closed_for_game,
+        )
+
+        if mozakere_night_act_is_closed_for_game(game, act):
+            await callback.answer(
+                MOZAKERE_NIGHT_PHASE_ENDED_TEXT, show_alert=True
+            )
+            return
+
+    from bot.room_mode import is_bazpors_no_host_room
+
+    if is_bazpors_no_host_room(game):
+        # اتمام اجباری شب بازپرس: اکت‌های شبانهٔ دیررس رد می‌شوند.
+        from bot.bazpors_force_finish_night import (
+            BAZPORS_NIGHT_PHASE_ENDED_TEXT,
+            bazpors_night_act_is_closed_for_game,
+        )
+
+        if bazpors_night_act_is_closed_for_game(game, act):
+            await callback.answer(
+                BAZPORS_NIGHT_PHASE_ENDED_TEXT, show_alert=True
+            )
+            return
 
     if game.scenario_name == "russian_mafia":
         from bot.russian_mafia_flow import (
@@ -710,6 +896,8 @@ async def player_mirror_cb(
     defense_acts = (
         "d1dc",
         "d1dn",
+        "d1nf",
+        "d1nb",
         "d1d0",
         "d1d1",
         "d1el",

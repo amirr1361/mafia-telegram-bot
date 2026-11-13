@@ -10,10 +10,12 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from bot.models import Game, Player, Role
 from bot.mason_multi_select_panels import (
+    MASON_FINAL_CONFIRM_LABEL,
+    build_mason_back_row,
+    build_mason_final_confirm_row,
     build_mason_multi_select_keyboard,
     build_mason_multi_select_panel_text,
-    mason_multi_select_no_more_button_label,
-    mason_multi_select_none_button_label,
+    build_mason_single_pick_keyboard,
 )
 from bot.no_host_night_common import (
     finalize_no_host_role_pick_message,
@@ -54,6 +56,15 @@ if TYPE_CHECKING:
 # Saboteur
 MSB_PICK, MSB_CONFIRM, MSB_BACK, MSB_NONE, MSB_OK = "msbp", "msbc", "msbb", "msbn", "msbo"
 MASON_SABOTEUR_GUN_SPENT_TEXT = "انتخاب شما لازم نیست. منتظر باشید."
+MASON_SABOTEUR_PICK_TEXT = (
+    "🔧 <b>خرابکار</b>\n\nیک بازیکن زنده را برای خرابکاری انتخاب کنید."
+)
+MASON_GUNNER_PICK_TEXT = (
+    "🔫 <b>تفنگدار</b>\n\nیک بازیکن را برای دریافت اسلحهٔ فردا انتخاب کنید."
+)
+MASON_GUARDIAN_PICK_TEXT = (
+    "🛡️ <b>محافظ</b>\n\nیک بازیکن را برای محافظت در برابر آپاچی انتخاب کنید."
+)
 # Doctor
 MSD_PICK, MSD_CONFIRM, MSD_BACK, MSD_DONE, MSD_OK = "msdp", "msdc", "msdb", "msdd", "msdo"
 # Sniper
@@ -87,6 +98,14 @@ MSC_PICK, MSC_CONFIRM, MSC_BACK, MSC_NONE, MSC_DONE, MSC_INFO_OK = (
     "mscd",
     "msci",
 )
+# Commander decision panel (mode B — sniper nominations)
+MSC_DEC_PICK, MSC_DEC_CONFIRM = "msce", "mscf"
+MASON_COMMANDER_NO_SHOT_LABEL = "🚫 انتخابی ندارم"
+MASON_COMMANDER_DECISION_REJECT_ONE = "🚫 رد درخواست شلیک"
+MASON_COMMANDER_DECISION_APPROVE_BOTH = "🎯 تأیید شلیک به هر دو بازیکن"
+MASON_COMMANDER_DECISION_REJECT_ALL = "🚫 رد تمام درخواست‌های شلیک"
+MASON_COMMANDER_DECISION_APPROVE_ONE = "🎯 تأیید شلیک به {name}"
+MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT = "ابتدا انتخاب کنید."
 MASON_COMMANDER_SNIPER_NO_SHOT_TEXT = "🎯 اسنایپر تصمیم گرفت امشب شلیک نکند."
 MASON_NO_NIGHT_PICK_WAIT_TEXT = "شما انتخابی ندارید. منتظر باشید"
 MASON_OK_CONFIRMED_PANEL_TEXT = "✅ انتخاب شما ثبت شد."
@@ -111,6 +130,7 @@ def mason_night_role_act_active(game: Game, act: str) -> bool:
         MSM_PICK, MSM_CONFIRM, MSM_BACK, MSM_NONE, MSM_TAILOR,
         MSDT_PICK, MSDT_CONFIRM, MSDT_BACK,
         MSC_PICK, MSC_CONFIRM, MSC_BACK, MSC_NONE, MSC_DONE, MSC_INFO_OK,
+        MSC_DEC_PICK, MSC_DEC_CONFIRM,
         MSNA_PICK, MSNA_CONFIRM, MSNA_BACK,
         MSPR_PICK, MSPR_CONFIRM, MSPR_BACK,
     }
@@ -258,16 +278,19 @@ async def _show_mason_sniper_panel(
     text = build_mason_multi_select_panel_text(
         header, game, gm, selected, max_allowed
     )
-    none_label = mason_multi_select_none_button_label(
-        len(selected), first_step_label="بدون شلیک"
-    )
+    no_shot = ms_sn.mason_sniper_night_no_shot_pending(game)
     kb = build_mason_multi_select_keyboard(
         game,
         uid,
         pick_act=MSS_PICK,
-        players=ms_sn.mason_sniper_available_shot_pool(game),
+        players=ms_sn.mason_sniper_shot_pool(game),
+        selected_uids=selected,
         none_act=MSS_NONE,
-        none_text=f"⭕ {none_label}",
+        none_text="⭕ بدون شلیک",
+        none_selected=no_shot,
+        done_act=MSS_CONFIRM if (selected or no_shot) else None,
+        done_text=MASON_FINAL_CONFIRM_LABEL if (selected or no_shot) else None,
+        display_names=gm.user_display_names,
     )
     ui = _ui(game, "mason_sniper", uid)
     if initial:
@@ -304,16 +327,19 @@ async def _show_mason_doctor_panel(
         f"تا {cap} نجات در این شب. بازیکنان را انتخاب کنید."
     )
     text = build_mason_multi_select_panel_text(header, game, gm, saved, cap)
-    none_label = mason_multi_select_none_button_label(
-        len(saved), first_step_label="انتخابی ندارم"
-    )
+    none_pending = ms_doc.mason_doctor_none_pending(game)
     kb = build_mason_multi_select_keyboard(
         game,
         uid,
         pick_act=MSD_PICK,
-        players=ms_doc.mason_doctor_save_pool(game),
+        players=ms_doc.mason_doctor_display_pool(game),
+        selected_uids=saved,
         none_act=MSD_DONE,
-        none_text=f"⭕ {none_label}",
+        none_text="⭕ انتخابی ندارم",
+        none_selected=none_pending,
+        done_act=MSD_CONFIRM if (saved or none_pending) else None,
+        done_text=MASON_FINAL_CONFIRM_LABEL if (saved or none_pending) else None,
+        display_names=gm.user_display_names,
     )
     ui = _ui(game, "mason_doctor", uid)
     if initial:
@@ -373,7 +399,9 @@ async def _show_mason_commander_panel(
     from bot.roles import mason_commander as ms_cmd
 
     if ms_cmd.mason_commander_inherits_sniper_shooting(game):
+        # حالت الف — اسنایپر شرکت نمی‌کند: انتخاب مستقیم اهداف
         selected = ms_sn.mason_sniper_night_selected_uids(game)
+        no_shot = bool(game.mason_commander_night_no_shot)
         max_allowed = ms_sn.mason_sniper_max_targets_this_night(game)
         header = (
             f"⭐ <b>فرمانده</b>\n\n"
@@ -383,58 +411,129 @@ async def _show_mason_commander_panel(
         text = build_mason_multi_select_panel_text(
             header, game, gm, selected, max_allowed
         )
-        none_label = mason_multi_select_none_button_label(
-            len(selected), first_step_label="بدون شلیک"
-        )
         kb = build_mason_multi_select_keyboard(
             game,
             uid,
             pick_act=MSC_PICK,
-            players=ms_cmd.mason_commander_direct_available_pool(game),
+            players=ms_cmd.mason_commander_shot_pool(game),
+            selected_uids=selected,
             none_act=MSC_NONE,
-            none_text=f"⭕ {none_label}",
+            none_text=MASON_COMMANDER_NO_SHOT_LABEL,
+            none_selected=no_shot,
+            done_act=MSC_CONFIRM if (selected or no_shot) else None,
+            done_text=MASON_FINAL_CONFIRM_LABEL if (selected or no_shot) else None,
+            display_names=gm.user_display_names,
         )
     else:
+        # حالت ب — تأیید نامزدهای اسنایپر
         sn_selected = ms_sn.mason_sniper_night_selected_uids(game)
-        approved = ms_cmd.mason_commander_approved_shot_uids(game)
+        pending = list(game.mason_commander_pending_decision_uids)
+        reject_all = bool(game.mason_commander_pending_reject_all)
+
+        def _name(u: int) -> str:
+            p = game.players.get(u)
+            return html.escape(gm.format_player_tag(p) if p else str(u))
+
+        def _dec_btn(label: str, tid: int, *, selected: bool) -> InlineKeyboardButton:
+            return InlineKeyboardButton(
+                text=label,
+                callback_data=PlayerMirrorCb(
+                    code=game.room_code, act=MSC_DEC_PICK, as_uid=uid, tid=tid
+                ).pack(),
+                style="danger" if selected else "primary",
+            )
+
         sn_names = ", ".join(
-            html.escape(gm.format_player_tag(game.players[u]))
-            for u in sn_selected
-            if u in game.players
+            _name(u) for u in sn_selected if u in game.players
         )
         header = (
             f"⭐ <b>فرمانده</b>\n\n"
             f"اهداف پیشنهادی اسنایپر: {sn_names}\n"
             "اهداف تأییدشده را انتخاب کنید."
         )
-        max_allowed = max(len(sn_selected), 1)
-        text = build_mason_multi_select_panel_text(
-            header,
-            game,
-            gm,
-            approved,
-            max_allowed,
-            line_prefix="تأیید",
-        )
-        none_act = MSC_NONE if not approved else None
-        none_text = "❌ رد همه" if not approved else None
-        done_act = None
-        done_text = None
-        if approved and ms_cmd.mason_commander_can_add_approval(game):
-            done_act = MSC_DONE
-            done_text = (
-                f"⭕ {mason_multi_select_no_more_button_label(len(approved) + 1)}"
+        text = header
+        rows: list[list[InlineKeyboardButton]] = []
+        if len(sn_selected) == 1:
+            a = sn_selected[0]
+            rows.append(
+                [
+                    _dec_btn(
+                        MASON_COMMANDER_DECISION_APPROVE_ONE.format(name=_name(a)),
+                        1,
+                        selected=bool(pending == [a] and not reject_all),
+                    )
+                ]
             )
-        kb = build_mason_multi_select_keyboard(
-            game,
-            uid,
-            pick_act=MSC_PICK,
-            players=ms_cmd.mason_commander_approval_pool(game),
-            none_act=none_act,
-            none_text=none_text,
-            done_act=done_act,
-            done_text=done_text,
-        )
+            rows.append(
+                [
+                    _dec_btn(
+                        MASON_COMMANDER_DECISION_REJECT_ONE,
+                        9,
+                        selected=reject_all,
+                    )
+                ]
+            )
+        elif len(sn_selected) == 2:
+            a, b = sn_selected
+            rows.append(
+                [
+                    _dec_btn(
+                        MASON_COMMANDER_DECISION_APPROVE_ONE.format(name=_name(a)),
+                        1,
+                        selected=bool(pending == [a] and not reject_all),
+                    )
+                ]
+            )
+            rows.append(
+                [
+                    _dec_btn(
+                        MASON_COMMANDER_DECISION_APPROVE_ONE.format(name=_name(b)),
+                        2,
+                        selected=bool(pending == [b] and not reject_all),
+                    )
+                ]
+            )
+            rows.append(
+                [
+                    _dec_btn(
+                        MASON_COMMANDER_DECISION_APPROVE_BOTH,
+                        8,
+                        selected=bool(sorted(pending) == sorted([a, b]) and not reject_all),
+                    )
+                ]
+            )
+            rows.append(
+                [
+                    _dec_btn(
+                        MASON_COMMANDER_DECISION_REJECT_ALL,
+                        9,
+                        selected=reject_all,
+                    )
+                ]
+            )
+        else:
+            # سه نامزد یا بیشتر — انتخاب چندگانهٔ نامزدها (قواعد تأیید جزئی موجود)
+            for u in sn_selected:
+                rows.append(
+                    [
+                        _dec_btn(
+                            MASON_COMMANDER_DECISION_APPROVE_ONE.format(name=_name(u)),
+                            u,
+                            selected=bool(u in pending and not reject_all),
+                        )
+                    ]
+                )
+            rows.append(
+                [
+                    _dec_btn(
+                        MASON_COMMANDER_DECISION_REJECT_ALL,
+                        9,
+                        selected=reject_all,
+                    )
+                ]
+            )
+        rows.append(build_mason_final_confirm_row(game, uid, confirm_act=MSC_DEC_CONFIRM))
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
     ui = _ui(game, "mason_commander", uid)
     if initial:
         await register_mirror_prompt_pair(
@@ -491,6 +590,105 @@ async def _send_commander_sniper_no_shot_info_panel(
     )
 
 
+async def _show_mason_saboteur_panel(
+    bot: Bot, game: Game, gm: "GameManager", uid: int, *, initial: bool = False
+) -> None:
+    kb = build_mason_single_pick_keyboard(
+        game,
+        uid,
+        pick_act=MSB_PICK,
+        players=ms_sab.mason_saboteur_night_target_pool(game),
+        pending_uid=game.mason_saboteur_night_target_uid,
+        confirm_act=MSB_CONFIRM,
+        back_act=MSB_BACK,
+        none_act=MSB_NONE,
+        none_text="انتخابی ندارم",
+        none_selected=game.mason_saboteur_night_no_sabotage,
+        display_names=gm.user_display_names,
+    )
+    ui = _ui(game, "mason_saboteur", uid)
+    if initial or not game.mirror_prompt_messages.get(ui):
+        await register_mirror_prompt_pair(
+            bot,
+            game,
+            uid,
+            ui,
+            MASON_SABOTEUR_PICK_TEXT,
+            kb,
+            send_player=True,
+            send_observer=no_host_observer_registered(game),
+            observer_same_text=False,
+            parse_mode="HTML",
+        )
+    else:
+        await sync_role_mirror_panel(bot, game, ui, uid, MASON_SABOTEUR_PICK_TEXT, kb)
+
+
+async def _show_mason_gunner_panel(
+    bot: Bot, game: Game, gm: "GameManager", uid: int, *, initial: bool = False
+) -> None:
+    kb = build_mason_single_pick_keyboard(
+        game,
+        uid,
+        pick_act=MGN_PICK,
+        players=ms_gn.mason_gunner_night_target_pool(game),
+        pending_uid=game.mason_gunner_night_target_uid,
+        confirm_act=MGN_CONFIRM,
+        back_act=MGN_BACK,
+        none_act=MGN_NONE,
+        none_text="انتخابی ندارم",
+        none_selected=game.mason_gunner_night_no_give,
+        display_names=gm.user_display_names,
+    )
+    ui = _ui(game, "mason_gunner", uid)
+    if initial or not game.mirror_prompt_messages.get(ui):
+        await register_mirror_prompt_pair(
+            bot,
+            game,
+            uid,
+            ui,
+            MASON_GUNNER_PICK_TEXT,
+            kb,
+            send_player=True,
+            send_observer=no_host_observer_registered(game),
+            observer_same_text=False,
+            parse_mode="HTML",
+        )
+    else:
+        await sync_role_mirror_panel(bot, game, ui, uid, MASON_GUNNER_PICK_TEXT, kb)
+
+
+async def _show_mason_guardian_panel(
+    bot: Bot, game: Game, gm: "GameManager", uid: int, *, initial: bool = False
+) -> None:
+    kb = build_mason_single_pick_keyboard(
+        game,
+        uid,
+        pick_act=MGD_PICK,
+        players=ms_gd.mason_guardian_night_target_pool(game),
+        pending_uid=game.mason_guardian_night_target_uid,
+        confirm_act=MGD_CONFIRM,
+        back_act=MGD_BACK,
+        display_names=gm.user_display_names,
+    )
+    ui = _ui(game, "mason_guardian", uid)
+    if initial or not game.mirror_prompt_messages.get(ui):
+        await register_mirror_prompt_pair(
+            bot,
+            game,
+            uid,
+            ui,
+            MASON_GUARDIAN_PICK_TEXT,
+            kb,
+            send_player=True,
+            send_observer=no_host_observer_registered(game),
+            observer_same_text=False,
+            parse_mode="HTML",
+        )
+    else:
+        await sync_role_mirror_panel(bot, game, ui, uid, MASON_GUARDIAN_PICK_TEXT, kb)
+
+
 async def _finalize_mason_no_pick_ok_panel(
     bot: Bot,
     game: Game,
@@ -542,17 +740,7 @@ async def dispatch_mason_saboteur_panel(bot: Bot, game: Game, gm: "GameManager")
     if not ms_sab.mason_saboteur_needs_night_pick(game):
         await _send_saboteur_no_pick_ok_panel(bot, game, sab.user_id)
         return
-    await _send_pick_panel(
-        bot,
-        game,
-        uid=sab.user_id,
-        ui_kind="mason_saboteur",
-        text="🔧 <b>خرابکار</b>\n\nیک بازیکن زنده را برای خرابکاری انتخاب کنید.",
-        pick_act=MSB_PICK,
-        pool=ms_sab.mason_saboteur_night_target_pool(game),
-        none_act=MSB_NONE,
-        none_text="انتخابی ندارم",
-    )
+    await _show_mason_saboteur_panel(bot, game, gm, sab.user_id, initial=True)
 
 
 async def dispatch_mason_doctor_panel(bot: Bot, game: Game, gm: "GameManager") -> None:
@@ -638,17 +826,7 @@ async def dispatch_mason_gunner_panel(bot: Bot, game: Game, gm: "GameManager") -
     if gun is None or not ms_gn.mason_gunner_can_give_gun(game):
         game.mason_night_gunner_confirmed = True
         return
-    await _send_pick_panel(
-        bot,
-        game,
-        uid=gun.user_id,
-        ui_kind="mason_gunner",
-        text="🔫 <b>تفنگدار</b>\n\nیک بازیکن را برای دریافت اسلحهٔ فردا انتخاب کنید.",
-        pick_act=MGN_PICK,
-        pool=ms_gn.mason_gunner_night_target_pool(game),
-        none_act=MGN_NONE,
-        none_text="انتخابی ندارم",
-    )
+    await _show_mason_gunner_panel(bot, game, gm, gun.user_id, initial=True)
 
 
 async def _send_guardian_no_pick_ok_panel(
@@ -681,30 +859,36 @@ async def dispatch_mason_guardian_panel(bot: Bot, game: Game, gm: "GameManager")
             bot, game, gd.user_id, text_body=_guardian_no_pick_body(game)
         )
         return
-    await _send_pick_panel(
-        bot,
-        game,
-        uid=gd.user_id,
-        ui_kind="mason_guardian",
-        text="🛡️ <b>محافظ</b>\n\nیک بازیکن را برای محافظت در برابر آپاچی انتخاب کنید.",
-        pick_act=MGD_PICK,
-        pool=ms_gd.mason_guardian_night_target_pool(game),
-    )
+    await _show_mason_guardian_panel(bot, game, gm, gd.user_id, initial=True)
 
 
 def _build_mason_recruit_keyboard(
     game: Game,
     mason: Player,
     pool: list[Player],
+    *,
+    pending_uid: int | None = None,
+    display_names: dict[int, str] | None = None,
 ) -> InlineKeyboardMarkup:
+    tailor = ms_msn.find_mason_tailor(game)
+    dead_tailor_pending = ms_msn.mason_recruit_dead_tailor_pending(game)
+    tailor_pending = (
+        not dead_tailor_pending
+        and pending_uid is not None
+        and tailor is not None
+        and tailor.is_alive
+        and pending_uid == tailor.user_id
+    )
     rows = build_target_button_rows(
         game,
         as_uid=mason.user_id,
         pick_act=MSM_PICK,
         players=pool,
+        selected_uids=[pending_uid] if pending_uid is not None else None,
+        selected_style="danger",
+        display_names=display_names,
     )
     if ms_msn.mason_show_tailor_recruit_button(game, mason):
-        tailor = ms_msn.find_mason_tailor(game)
         rows.append(
             [
                 InlineKeyboardButton(
@@ -715,18 +899,58 @@ def _build_mason_recruit_keyboard(
                         as_uid=mason.user_id,
                         tid=tailor.user_id if tailor is not None else 0,
                     ).pack(),
+                    style="danger" if (dead_tailor_pending or tailor_pending) else "primary",
                 )
             ]
         )
-    rows.append(
-        build_none_pick_row(
-            game,
-            mason.user_id,
-            none_act=MSM_NONE,
-            none_text=ms_msn.MASON_NO_RECRUIT_LABEL,
-        )
+    none_row = build_none_pick_row(
+        game,
+        mason.user_id,
+        none_act=MSM_NONE,
+        none_text=ms_msn.MASON_NO_RECRUIT_LABEL,
     )
+    for btn in none_row:
+        btn.style = "danger" if game.mason_mason_night_no_recruit else "primary"
+    rows.append(none_row)
+    if pending_uid is not None or dead_tailor_pending or game.mason_mason_night_no_recruit:
+        rows.append(
+            build_mason_final_confirm_row(game, mason.user_id, confirm_act=MSM_CONFIRM)
+        )
+        rows.append(build_mason_back_row(game, mason.user_id, back_act=MSM_BACK))
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _show_mason_recruit_panel(
+    bot: Bot, game: Game, gm: "GameManager", uid: int, *, initial: bool = False
+) -> None:
+    mason = game.players.get(uid)
+    if mason is None:
+        return
+    pool = ms_msn.mason_recruit_target_pool(game, mason)
+    kb = _build_mason_recruit_keyboard(
+        game,
+        mason,
+        pool,
+        pending_uid=game.mason_pending_recruit_uid,
+        display_names=gm.user_display_names,
+    )
+    text = ms_msn.build_mason_recruit_panel_html(game)
+    ui = _ui(game, "mason_recruit", uid)
+    if initial or not game.mirror_prompt_messages.get(ui):
+        await register_mirror_prompt_pair(
+            bot,
+            game,
+            uid,
+            ui,
+            text,
+            kb,
+            send_player=True,
+            send_observer=no_host_observer_registered(game),
+            observer_same_text=False,
+            parse_mode="HTML",
+        )
+    else:
+        await sync_role_mirror_panel(bot, game, ui, uid, text, kb)
 
 
 async def dispatch_mason_mason_recruit_panel(bot: Bot, game: Game, gm: "GameManager") -> None:
@@ -734,20 +958,45 @@ async def dispatch_mason_mason_recruit_panel(bot: Bot, game: Game, gm: "GameMana
     if mason is None:
         game.mason_night_mason_confirmed = True
         return
-    pool = ms_msn.mason_recruit_target_pool(game, mason)
-    kb = _build_mason_recruit_keyboard(game, mason, pool)
-    await register_mirror_prompt_pair(
-        bot,
+    await _show_mason_recruit_panel(bot, game, gm, mason.user_id, initial=True)
+
+
+async def _show_mason_detective_panel(
+    bot: Bot,
+    game: Game,
+    gm: "GameManager",
+    uid: int,
+    *,
+    initial: bool = False,
+) -> None:
+    pending = game.mason_night_detective_pending_uid
+    kb = build_mason_single_pick_keyboard(
         game,
-        mason.user_id,
-        _ui(game, "mason_recruit", mason.user_id),
-        ms_msn.build_mason_recruit_panel_html(game),
-        kb,
-        send_player=True,
-        send_observer=no_host_observer_registered(game),
-        observer_same_text=False,
-        parse_mode="HTML",
+        uid,
+        pick_act=MSDT_PICK,
+        players=investigation_pool(game),
+        pending_uid=pending,
+        confirm_act=MSDT_CONFIRM,
+        back_act=MSDT_BACK,
+        display_names=gm.user_display_names,
     )
+    text = "🔍 <b>کارآگاه</b>\n\nیک بازیکن را برای استعلام انتخاب کنید."
+    ui = _ui(game, "mason_detective", uid)
+    if initial or not game.mirror_prompt_messages.get(ui):
+        await register_mirror_prompt_pair(
+            bot,
+            game,
+            uid,
+            ui,
+            text,
+            kb,
+            send_player=True,
+            send_observer=no_host_observer_registered(game),
+            observer_same_text=False,
+            parse_mode="HTML",
+        )
+    else:
+        await sync_role_mirror_panel(bot, game, ui, uid, text, kb)
 
 
 async def dispatch_mason_detective_panel(bot: Bot, game: Game, gm: "GameManager") -> None:
@@ -755,15 +1004,44 @@ async def dispatch_mason_detective_panel(bot: Bot, game: Game, gm: "GameManager"
     if det is None:
         game.mason_night_detective_confirmed = True
         return
-    await _send_pick_panel(
-        bot,
+    await _show_mason_detective_panel(bot, game, gm, det.user_id, initial=True)
+
+
+async def _show_mason_natasha_panel(
+    bot: Bot,
+    game: Game,
+    gm: "GameManager",
+    uid: int,
+    *,
+    initial: bool = False,
+) -> None:
+    kb = build_mason_single_pick_keyboard(
         game,
-        uid=det.user_id,
-        ui_kind="mason_detective",
-        text="🔍 <b>کارآگاه</b>\n\nیک بازیکن را برای استعلام انتخاب کنید.",
-        pick_act=MSDT_PICK,
-        pool=investigation_pool(game),
+        uid,
+        pick_act=MSNA_PICK,
+        players=ms_nat.mason_natasha_night_target_pool(game),
+        pending_uid=game.mason_natasha_target_uid,
+        confirm_act=MSNA_CONFIRM,
+        back_act=MSNA_BACK,
+        display_names=gm.user_display_names,
     )
+    text = "🤐 <b>ناتاشا</b>\n\nیک بازیکن را برای سکوت فردا انتخاب کنید."
+    ui = _ui(game, "mason_natasha", uid)
+    if initial or not game.mirror_prompt_messages.get(ui):
+        await register_mirror_prompt_pair(
+            bot,
+            game,
+            uid,
+            ui,
+            text,
+            kb,
+            send_player=True,
+            send_observer=no_host_observer_registered(game),
+            observer_same_text=False,
+            parse_mode="HTML",
+        )
+    else:
+        await sync_role_mirror_panel(bot, game, ui, uid, text, kb)
 
 
 async def dispatch_mason_natasha_panel(bot: Bot, game: Game, gm: "GameManager") -> None:
@@ -771,15 +1049,44 @@ async def dispatch_mason_natasha_panel(bot: Bot, game: Game, gm: "GameManager") 
     if nat is None:
         game.mason_night_natasha_confirmed = True
         return
-    await _send_pick_panel(
-        bot,
+    await _show_mason_natasha_panel(bot, game, gm, nat.user_id, initial=True)
+
+
+async def _show_mason_priest_panel(
+    bot: Bot,
+    game: Game,
+    gm: "GameManager",
+    uid: int,
+    *,
+    initial: bool = False,
+) -> None:
+    kb = build_mason_single_pick_keyboard(
         game,
-        uid=nat.user_id,
-        ui_kind="mason_natasha",
-        text="🤐 <b>ناتاشا</b>\n\nیک بازیکن را برای سکوت فردا انتخاب کنید.",
-        pick_act=MSNA_PICK,
-        pool=ms_nat.mason_natasha_night_target_pool(game),
+        uid,
+        pick_act=MSPR_PICK,
+        players=ms_pr.mason_priest_night_target_pool(game),
+        pending_uid=game.mason_priest_target_uid,
+        confirm_act=MSPR_CONFIRM,
+        back_act=MSPR_BACK,
+        display_names=gm.user_display_names,
     )
+    text = "⛪ <b>کشیش</b>\n\nیک بازیکن را برای خنثی‌سازی سکوت ناتاشا انتخاب کنید."
+    ui = _ui(game, "mason_priest", uid)
+    if initial or not game.mirror_prompt_messages.get(ui):
+        await register_mirror_prompt_pair(
+            bot,
+            game,
+            uid,
+            ui,
+            text,
+            kb,
+            send_player=True,
+            send_observer=no_host_observer_registered(game),
+            observer_same_text=False,
+            parse_mode="HTML",
+        )
+    else:
+        await sync_role_mirror_panel(bot, game, ui, uid, text, kb)
 
 
 async def dispatch_mason_priest_panel(bot: Bot, game: Game, gm: "GameManager") -> None:
@@ -787,15 +1094,7 @@ async def dispatch_mason_priest_panel(bot: Bot, game: Game, gm: "GameManager") -
     if pr is None:
         game.mason_night_priest_confirmed = True
         return
-    await _send_pick_panel(
-        bot,
-        game,
-        uid=pr.user_id,
-        ui_kind="mason_priest",
-        text="⛪ <b>کشیش</b>\n\nیک بازیکن را برای خنثی‌سازی سکوت ناتاشا انتخاب کنید.",
-        pick_act=MSPR_PICK,
-        pool=ms_pr.mason_priest_night_target_pool(game),
-    )
+    await _show_mason_priest_panel(bot, game, gm, pr.user_id, initial=True)
 
 
 def build_mason_night_finalized_selection_label(
@@ -925,33 +1224,44 @@ async def dispatch_mason_night_role(
             return
         ui = _ui(game, "mason_saboteur", as_uid)
         if act == MSB_NONE:
-            if not ms_sab.commit_mason_saboteur_no_sabotage(game):
-                await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
-                return
-            game.mason_night_saboteur_confirmed = True
-            await callback.answer("ثبت شد.")
-            await _after_role_confirmed(bot, game, gm, as_uid, "mason_saboteur", "خرابکار")
+            # انتخاب موقت «انتخابی ندارم» — اجرا فقط پس از تأیید نهایی.
+            if game.mason_saboteur_night_no_sabotage:
+                game.mason_saboteur_night_no_sabotage = False
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                if not ms_sab.commit_mason_saboteur_no_sabotage(game):
+                    await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+                    return
+                await callback.answer("انتخاب شد.")
+            await _show_mason_saboteur_panel(bot, game, gm, as_uid)
             return
         if act == MSB_PICK:
             tgt = game.players.get(tid)
-            if tgt is None or not ms_sab.commit_mason_saboteur_target(game, sab, tgt):
+            if tgt is None or not ms_sab.mason_saboteur_can_target(game, sab, tgt):
                 await callback.answer("انتخاب نامعتبر.", show_alert=True)
                 return
-            await callback.answer("انتخاب شد.")
-            kb = build_confirm_cancel_keyboard(
-                game, as_uid,
-                confirm_act=MSB_CONFIRM, back_act=MSB_BACK,
-                confirm_text="✅ تأیید", back_text="↩️ بازگشت",
-            )
-            await sync_role_mirror_panel(bot, game, ui, as_uid, "تأیید خرابکار", kb)
+            if game.mason_saboteur_night_target_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                ms_sab.clear_mason_saboteur_night_pick(game)
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                if not ms_sab.commit_mason_saboteur_target(game, sab, tgt):
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                await callback.answer("انتخاب شد.")
+            await _show_mason_saboteur_panel(bot, game, gm, as_uid)
             return
         if act == MSB_BACK:
             await callback.answer("بازگشت.")
-            await dispatch_mason_saboteur_panel(bot, game, gm)
+            ms_sab.clear_mason_saboteur_night_pick(game)
+            await _show_mason_saboteur_panel(bot, game, gm, as_uid, initial=False)
             return
         if act == MSB_CONFIRM:
-            if game.mason_saboteur_night_target_uid is None:
-                await callback.answer("ابتدا هدف را انتخاب کنید.", show_alert=True)
+            if (
+                game.mason_saboteur_night_target_uid is None
+                and not game.mason_saboteur_night_no_sabotage
+            ):
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
                 return
             game.mason_night_saboteur_confirmed = True
             await callback.answer("ثبت شد.")
@@ -989,20 +1299,58 @@ async def dispatch_mason_night_role(
             return
         ui = _ui(game, "mason_doctor", as_uid)
         if act == MSD_PICK:
-            if not ms_doc.commit_mason_doctor_save(game, tid):
-                await callback.answer("انتخاب نامعتبر.", show_alert=True)
-                return
-            await callback.answer("نجات ثبت شد.")
-            if not ms_doc.can_add_mason_doctor_save(game):
-                game.mason_night_doctor_confirmed = True
-                await _after_role_confirmed(bot, game, gm, as_uid, "mason_doctor", "پزشک")
+            if tid in ms_doc.mason_doctor_night_save_uids(game):
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                if not ms_doc.remove_mason_doctor_save(game, tid):
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                await callback.answer("انتخاب حذف شد.")
+            elif (
+                ms_doc.mason_doctor_save_capacity(game) == 1
+                and ms_doc.mason_doctor_night_save_uids(game)
+                and ms_doc.mason_target_valid_for_save(game, tid)
+            ):
+                # ظرفیت ۱ — لمس بازیکن دیگر، هدف قبلی را مستقیم جایگزین می‌کند.
+                previous = list(ms_doc.mason_doctor_night_save_uids(game))
+                for prev_uid in previous:
+                    ms_doc.remove_mason_doctor_save(game, prev_uid)
+                if not ms_doc.commit_mason_doctor_save(game, tid):
+                    for prev_uid in previous:
+                        ms_doc.commit_mason_doctor_save(game, prev_uid)
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                await callback.answer("انتخاب شد.")
             else:
-                await _show_mason_doctor_panel(bot, game, gm, as_uid)
+                if not ms_doc.commit_mason_doctor_save(game, tid):
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                await callback.answer("نجات ثبت شد.")
+            ms_doc.clear_mason_doctor_none_pending(game)
+            await _show_mason_doctor_panel(bot, game, gm, as_uid)
             return
-        if act == MSD_DONE:
+        if act == MSD_CONFIRM:
+            if (
+                not ms_doc.mason_doctor_night_save_uids(game)
+                and not game.mason_doctor_night_none_pending
+            ):
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
+                return
             game.mason_night_doctor_confirmed = True
             await callback.answer("ثبت شد.")
             await _after_role_confirmed(bot, game, gm, as_uid, "mason_doctor", "پزشک")
+            return
+        if act == MSD_DONE:
+            # انتخاب موقت «انتخابی ندارم» — اجرا فقط پس از تأیید نهایی.
+            if game.mason_doctor_night_none_pending:
+                ms_doc.clear_mason_doctor_none_pending(game)
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                if not ms_doc.set_mason_doctor_none_pending(game):
+                    await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+                    return
+                await callback.answer("انتخاب شد.")
+            await _show_mason_doctor_panel(bot, game, gm, as_uid)
+            return
         return
 
     # --- Sniper ---
@@ -1039,38 +1387,59 @@ async def dispatch_mason_night_role(
             await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
             return
         if act == MSS_NONE:
-            if not ms_sn.mason_sniper_night_selected_uids(game):
+            # انتخاب موقت «بدون شلیک» — اجرا فقط پس از تأیید نهایی.
+            if game.mason_sniper_night_no_shot:
+                game.mason_sniper_night_no_shot = False
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                ms_sn.clear_mason_sniper_night_selection(game)
+                game.mason_sniper_night_no_shot = True
+                await callback.answer("انتخاب شد.")
+            await _show_mason_sniper_panel(bot, game, gm, as_uid)
+            return
+        if act == MSS_PICK:
+            selected = list(ms_sn.mason_sniper_night_selected_uids(game))
+            max_targets = ms_sn.mason_sniper_max_targets_this_night(game)
+            game.mason_sniper_night_no_shot = False
+            if tid in selected:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                selected.remove(tid)
+                if not ms_sn.commit_mason_sniper_night_selection(game, selected):
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                if len(selected) >= max_targets:
+                    await callback.answer("حداکثر تعداد اهداف انتخاب شده.", show_alert=True)
+                    return
+                selected.append(tid)
+                if not ms_sn.commit_mason_sniper_night_selection(game, selected):
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                await callback.answer("انتخاب شد.")
+            await _show_mason_sniper_panel(bot, game, gm, as_uid)
+            return
+        if act == MSS_CONFIRM:
+            if (
+                not ms_sn.mason_sniper_night_selected_uids(game)
+                and not game.mason_sniper_night_no_shot
+            ):
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
+                return
+            if game.mason_sniper_night_no_shot:
                 ms_sn.clear_mason_sniper_night_selection(game)
             game.mason_night_sniper_confirmed = True
             await callback.answer("ثبت شد.")
             await _after_role_confirmed(bot, game, gm, as_uid, "mason_sniper", "اسنایپر")
             await dispatch_mason_commander_panel(bot, game, gm)
             return
-        if act == MSS_PICK:
-            selected = list(ms_sn.mason_sniper_night_selected_uids(game))
-            if tid in selected:
-                await callback.answer("این بازیکن قبلاً انتخاب شده.", show_alert=True)
-                return
-            max_targets = ms_sn.mason_sniper_max_targets_this_night(game)
-            if len(selected) >= max_targets:
-                await callback.answer("حداکثر تعداد اهداف انتخاب شده.", show_alert=True)
-                return
-            selected.append(tid)
-            if not ms_sn.commit_mason_sniper_night_selection(game, selected):
-                await callback.answer("انتخاب نامعتبر.", show_alert=True)
-                return
-            await callback.answer("انتخاب شد.")
-            if len(selected) >= max_targets:
-                game.mason_night_sniper_confirmed = True
-                await _after_role_confirmed(bot, game, gm, as_uid, "mason_sniper", "اسنایپر")
-                await dispatch_mason_commander_panel(bot, game, gm)
-            else:
-                await _show_mason_sniper_panel(bot, game, gm, as_uid)
-            return
         return
 
     # --- Commander ---
-    if act in (MSC_PICK, MSC_CONFIRM, MSC_BACK, MSC_NONE, MSC_DONE, MSC_INFO_OK):
+    if act in (
+        MSC_PICK, MSC_CONFIRM, MSC_BACK, MSC_NONE, MSC_DONE, MSC_INFO_OK,
+        MSC_DEC_PICK, MSC_DEC_CONFIRM,
+    ):
         from bot.roles import mason_commander as ms_cmd
 
         cmd = ms_cmd.find_alive_mason_commander(game)
@@ -1102,62 +1471,158 @@ async def dispatch_mason_night_role(
         if game.mason_night_commander_confirmed:
             await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
             return
-        if act == MSC_NONE:
-            if ms_cmd.mason_commander_inherits_sniper_shooting(game):
-                if ms_sn.mason_sniper_night_selected_uids(game):
-                    ms_cmd.finalize_mason_commander_direct_shots(game)
+        if act == MSC_DEC_PICK:
+            # حالت ب — انتخاب موقت تصمیم (تأیید نامزدها)
+            sn_selected = ms_sn.mason_sniper_night_selected_uids(game)
+            if not sn_selected:
+                await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+                return
+            if tid == 9:
+                # رد درخواست(ها) — انتخاب موقت
+                if game.mason_commander_pending_reject_all:
+                    game.mason_commander_pending_reject_all = False
+                    await callback.answer("انتخاب حذف شد.")
                 else:
-                    ms_cmd.mason_commander_rejects_all_shots(game)
+                    game.mason_commander_pending_decision_uids = []
+                    game.mason_commander_pending_reject_all = True
+                    await callback.answer("انتخاب شد.")
+            elif tid == 8 and len(sn_selected) == 2:
+                # «تأیید شلیک به هر دو بازیکن» — انتخاب موقت
+                a, b = sn_selected
+                if (
+                    sorted(game.mason_commander_pending_decision_uids) == [a, b]
+                    and not game.mason_commander_pending_reject_all
+                ):
+                    game.mason_commander_pending_decision_uids = []
+                    await callback.answer("انتخاب حذف شد.")
+                else:
+                    game.mason_commander_pending_decision_uids = [a, b]
+                    game.mason_commander_pending_reject_all = False
+                    await callback.answer("انتخاب شد.")
+            elif len(sn_selected) >= 3:
+                # سه نامزد یا بیشتر — انتخاب چندگانهٔ نامزدها (تأیید جزئی موجود)
+                if tid not in sn_selected:
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                pending = list(game.mason_commander_pending_decision_uids)
+                if tid in pending:
+                    pending.remove(tid)
+                    game.mason_commander_pending_decision_uids = pending
+                    await callback.answer("انتخاب حذف شد.")
+                else:
+                    cap = ms_sn.mason_sniper_max_targets_this_night(game)
+                    if len(pending) >= cap:
+                        await callback.answer(
+                            "حداکثر تعداد اهداف انتخاب شده.", show_alert=True
+                        )
+                        return
+                    pending.append(tid)
+                    game.mason_commander_pending_decision_uids = pending
+                    game.mason_commander_pending_reject_all = False
+                    await callback.answer("انتخاب شد.")
             else:
+                # تک‌نامزد / دو نامزد — تک‌انتخاب تصمیم
+                if tid < 1 or tid > len(sn_selected):
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                chosen = sn_selected[tid - 1]
+                if (
+                    game.mason_commander_pending_decision_uids == [chosen]
+                    and not game.mason_commander_pending_reject_all
+                ):
+                    game.mason_commander_pending_decision_uids = []
+                    await callback.answer("انتخاب حذف شد.")
+                else:
+                    game.mason_commander_pending_decision_uids = [chosen]
+                    game.mason_commander_pending_reject_all = False
+                    await callback.answer("انتخاب شد.")
+            await _show_mason_commander_panel(bot, game, gm, as_uid)
+            return
+        if act == MSC_DEC_CONFIRM:
+            # حالت ب — تأیید نهایی تصمیم
+            if game.mason_commander_pending_reject_all:
                 ms_cmd.mason_commander_rejects_all_shots(game)
+            elif game.mason_commander_pending_decision_uids:
+                pending_uids = list(game.mason_commander_pending_decision_uids)
+                if not ms_cmd.commit_mason_commander_approval(game, pending_uids):
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+            else:
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
+                return
+            game.mason_commander_pending_decision_uids = []
+            game.mason_commander_pending_reject_all = False
             game.mason_night_commander_confirmed = True
             await callback.answer("ثبت شد.")
             await _after_role_confirmed(bot, game, gm, as_uid, "mason_commander", "فرمانده")
             return
+        if act == MSC_NONE:
+            if ms_cmd.mason_commander_inherits_sniper_shooting(game):
+                # حالت الف — انتخاب موقت «انتخابی ندارم»
+                if game.mason_commander_night_no_shot:
+                    game.mason_commander_night_no_shot = False
+                    await callback.answer("انتخاب حذف شد.")
+                else:
+                    ms_sn.clear_mason_sniper_night_selection(game)
+                    game.mason_commander_night_no_shot = True
+                    await callback.answer("انتخاب شد.")
+                await _show_mason_commander_panel(bot, game, gm, as_uid)
+                return
+            # حالت ب — دکمهٔ قدیمی؛ تصمیم با MSC_DEC_PICK ثبت می‌شود.
+            await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+            return
         if act == MSC_DONE:
+            # دکمهٔ پنل قدیمی — اجرای بدون تأیید دیگر مجاز نیست.
+            await callback.answer(MASON_DEAD_PANEL_INACTIVE_TEXT, show_alert=True)
+            return
+        if act == MSC_CONFIRM:
+            # حالت الف — تأیید نهایی انتخاب مستقیم
+            if not ms_cmd.mason_commander_inherits_sniper_shooting(game):
+                await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+                return
+            if game.mason_commander_night_no_shot:
+                ms_cmd.mason_commander_rejects_all_shots(game)
+            elif ms_sn.mason_sniper_night_selected_uids(game):
+                ms_cmd.finalize_mason_commander_direct_shots(game)
+            else:
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
+                return
+            game.mason_commander_night_no_shot = False
             game.mason_night_commander_confirmed = True
             await callback.answer("ثبت شد.")
             await _after_role_confirmed(bot, game, gm, as_uid, "mason_commander", "فرمانده")
             return
         if act == MSC_PICK:
             if ms_cmd.mason_commander_inherits_sniper_shooting(game):
+                # حالت الف — انتخاب موقت اهداف؛ ظرفیت ۱ = جایگزینی مستقیم
                 selected = list(ms_sn.mason_sniper_night_selected_uids(game))
-                if tid in selected:
-                    await callback.answer("این بازیکن قبلاً انتخاب شده.", show_alert=True)
-                    return
                 max_targets = ms_sn.mason_sniper_max_targets_this_night(game)
-                if len(selected) >= max_targets:
+                game.mason_commander_night_no_shot = False
+                if tid in selected:
+                    # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                    selected.remove(tid)
+                    if not ms_sn.commit_mason_sniper_night_selection(game, selected):
+                        await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                        return
+                    await callback.answer("انتخاب حذف شد.")
+                elif max_targets == 1 and selected:
+                    if not ms_sn.commit_mason_sniper_night_selection(game, [tid]):
+                        await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                        return
+                    await callback.answer("انتخاب شد.")
+                elif len(selected) >= max_targets:
                     await callback.answer("حداکثر تعداد اهداف انتخاب شده.", show_alert=True)
                     return
-                if not ms_cmd.add_mason_commander_direct_shot(game, tid):
-                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
-                    return
-                await callback.answer("انتخاب شد.")
-                selected = ms_sn.mason_sniper_night_selected_uids(game)
-                if len(selected) >= max_targets:
-                    ms_cmd.finalize_mason_commander_direct_shots(game)
-                    game.mason_night_commander_confirmed = True
-                    await _after_role_confirmed(
-                        bot, game, gm, as_uid, "mason_commander", "فرمانده"
-                    )
                 else:
-                    await _show_mason_commander_panel(bot, game, gm, as_uid)
+                    if not ms_sn.commit_mason_sniper_night_selection(game, selected + [tid]):
+                        await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                        return
+                    await callback.answer("انتخاب شد.")
+                await _show_mason_commander_panel(bot, game, gm, as_uid)
             else:
-                if not ms_cmd.add_mason_commander_approval(game, tid):
-                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
-                    return
-                await callback.answer("تأیید شد.")
-                approved = ms_cmd.mason_commander_approved_shot_uids(game)
-                sn_selected = ms_sn.mason_sniper_night_selected_uids(game)
-                if len(approved) >= len(sn_selected) or not ms_cmd.mason_commander_can_add_approval(game):
-                    game.mason_night_commander_confirmed = True
-                    await _after_role_confirmed(
-                        bot, game, gm, as_uid, "mason_commander", "فرمانده"
-                    )
-                else:
-                    await _show_mason_commander_panel(bot, game, gm, as_uid)
+                # حالت ب — پنل تصمیم از MSC_DEC_PICK استفاده می‌کند.
+                await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
             return
-        return
 
     # --- Gunner ---
     if act in (MGN_PICK, MGN_CONFIRM, MGN_BACK, MGN_NONE):
@@ -1171,20 +1636,55 @@ async def dispatch_mason_night_role(
             await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
             return
         if act == MGN_NONE:
-            if not ms_gn.commit_mason_gunner_no_give(game):
-                await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+            # انتخاب موقت «انتخابی ندارم» — اجرا فقط پس از تأیید نهایی.
+            if game.mason_gunner_night_no_give:
+                game.mason_gunner_night_no_give = False
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                if not ms_gn.commit_mason_gunner_no_give(game):
+                    await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+                    return
+                await callback.answer("انتخاب شد.")
+            await _show_mason_gunner_panel(bot, game, gm, as_uid)
+            return
+        if act == MGN_PICK:
+            tgt = game.players.get(tid)
+            if tgt is None or not ms_gn.mason_gunner_can_target(game, gun, tgt):
+                await callback.answer("انتخاب نامعتبر.", show_alert=True)
                 return
+            if game.mason_gunner_night_target_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                ms_gn.clear_mason_gunner_night_pick(game)
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                if not ms_gn.commit_mason_gunner_target(game, gun, tgt):
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                await callback.answer("انتخاب شد.")
+            await _show_mason_gunner_panel(bot, game, gm, as_uid)
+            return
+        if act == MGN_BACK:
+            ms_gn.clear_mason_gunner_night_pick(game)
+            await callback.answer("بازگشت.")
+            await _show_mason_gunner_panel(bot, game, gm, as_uid, initial=False)
+            return
+        if act == MGN_CONFIRM:
+            if (
+                game.mason_gunner_night_target_uid is None
+                and not game.mason_gunner_night_no_give
+            ):
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
+                return
+            if game.mason_gunner_night_no_give:
+                ms_gn.clear_mason_gunner_night_pick(game)
+                if not ms_gn.commit_mason_gunner_no_give(game):
+                    await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
+                    return
             game.mason_night_gunner_confirmed = True
             await callback.answer("ثبت شد.")
             await _after_role_confirmed(bot, game, gm, as_uid, "mason_gunner", "تفنگدار")
             return
-        tgt = game.players.get(tid)
-        if act == MGN_PICK and tgt and ms_gn.commit_mason_gunner_target(game, gun, tgt):
-            game.mason_night_gunner_confirmed = True
-            await callback.answer("ثبت شد.")
-            await _after_role_confirmed(bot, game, gm, as_uid, "mason_gunner", "تفنگدار")
-        else:
-            await callback.answer("انتخاب نامعتبر.", show_alert=True)
+        await callback.answer("انتخاب نامعتبر.", show_alert=True)
         return
 
     # --- Guardian ---
@@ -1216,8 +1716,30 @@ async def dispatch_mason_night_role(
             await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
             return
         if act == MGD_PICK:
-            if not ms_gd.commit_mason_guardian_night_pick(game, tid):
+            tgt = game.players.get(tid)
+            if tgt is None or not ms_gd.mason_guardian_night_target_valid(game, tid):
                 await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                return
+            if game.mason_guardian_night_target_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                ms_gd.clear_mason_guardian_night_pick(game)
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                if not ms_gd.commit_mason_guardian_night_pick(game, tid):
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                await callback.answer("انتخاب شد.")
+            await _show_mason_guardian_panel(bot, game, gm, as_uid)
+            return
+        if act == MGD_BACK:
+            ms_gd.clear_mason_guardian_night_pick(game)
+            await callback.answer("بازگشت.")
+            await _show_mason_guardian_panel(bot, game, gm, as_uid, initial=False)
+            return
+        if act == MGD_CONFIRM:
+            pending_uid = game.mason_guardian_night_target_uid
+            if pending_uid is None or not ms_gd.mason_guardian_night_target_valid(game, pending_uid):
+                await callback.answer("ابتدا هدف را انتخاب کنید.", show_alert=True)
                 return
             game.mason_night_guardian_confirmed = True
             await callback.answer("ثبت شد.")
@@ -1231,16 +1753,74 @@ async def dispatch_mason_night_role(
             await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
             return
         if act == MSM_NONE:
-            ms_msn.commit_mason_recruit(game, mason, None)
-            game.mason_night_mason_confirmed = True
-            await callback.answer("ثبت شد.")
-            await _after_role_confirmed(bot, game, gm, as_uid, "mason_recruit", "ماسون")
+            # انتخاب موقت «انتخابی ندارم» — اجرا فقط پس از تأیید نهایی.
+            if game.mason_mason_night_no_recruit:
+                game.mason_mason_night_no_recruit = False
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                game.mason_pending_recruit_uid = None
+                ms_msn.clear_mason_recruit_dead_tailor_pending(game)
+                game.mason_mason_night_no_recruit = True
+                await callback.answer("انتخاب شد.")
+            await _show_mason_recruit_panel(bot, game, gm, as_uid)
             return
         if act == MSM_TAILOR:
             if ms_msn.mason_is_dead_tailor_recruit_button(game, mason):
+                # انتخاب موقت «تایلر مرده» — مصرف دکمه فقط پس از تأیید نهایی.
+                if ms_msn.mason_recruit_dead_tailor_pending(game):
+                    ms_msn.clear_mason_recruit_dead_tailor_pending(game)
+                    await callback.answer("انتخاب حذف شد.")
+                else:
+                    game.mason_pending_recruit_uid = None
+                    game.mason_mason_night_no_recruit = False
+                    game.mason_pending_recruit_dead_tailor = True
+                    await callback.answer("انتخاب شد.")
+                await _show_mason_recruit_panel(bot, game, gm, as_uid)
+                return
+            if not ms_msn.mason_show_alive_tailor_recruit_button(game, mason):
+                await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                return
+            tailor = ms_msn.find_alive_mason_tailor(game)
+            tailor_uid = tailor.user_id if tailor is not None else None
+            if game.mason_pending_recruit_uid == tailor_uid:
+                game.mason_pending_recruit_uid = None
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                game.mason_pending_recruit_uid = tailor_uid
+                game.mason_mason_night_no_recruit = False
+                ms_msn.clear_mason_recruit_dead_tailor_pending(game)
+                await callback.answer("انتخاب شد.")
+            await _show_mason_recruit_panel(bot, game, gm, as_uid)
+            return
+        if act == MSM_PICK:
+            tgt = game.players.get(tid)
+            if tgt is None or not ms_msn.mason_can_recruit_target(game, mason, tgt):
+                await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                return
+            if game.mason_pending_recruit_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                game.mason_pending_recruit_uid = None
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                # فقط انتخاب موقت — جذب واقعی پس از تأیید نهایی.
+                game.mason_pending_recruit_uid = tid
+                game.mason_mason_night_no_recruit = False
+                ms_msn.clear_mason_recruit_dead_tailor_pending(game)
+                await callback.answer("انتخاب شد.")
+            await _show_mason_recruit_panel(bot, game, gm, as_uid)
+            return
+        if act == MSM_BACK:
+            game.mason_pending_recruit_uid = None
+            ms_msn.clear_mason_recruit_dead_tailor_pending(game)
+            await callback.answer("بازگشت.")
+            await _show_mason_recruit_panel(bot, game, gm, as_uid, initial=False)
+            return
+        if act == MSM_CONFIRM:
+            if ms_msn.mason_recruit_dead_tailor_pending(game):
                 if not ms_msn.commit_mason_recruit_dead_tailor(game, mason):
                     await callback.answer("انتخاب نامعتبر.", show_alert=True)
                     return
+                game.mason_pending_recruit_dead_tailor = False
                 game.mason_night_mason_confirmed = True
                 await callback.answer("ثبت شد.")
                 await finalize_no_host_role_pick_message(
@@ -1255,30 +1835,41 @@ async def dispatch_mason_night_role(
 
                 await maybe_finish_mason_parallel_night(bot, game, gm)
                 return
-            if not ms_msn.mason_show_alive_tailor_recruit_button(game, mason):
-                await callback.answer("انتخاب نامعتبر.", show_alert=True)
-                return
-            welcome = ms_msn.commit_mason_recruit_tailor(game, mason)
-            if welcome is None:
-                await callback.answer("انتخاب نامعتبر.", show_alert=True)
-                return
-            recruit_uid = game.mason_pending_recruit_uid
-            if recruit_uid is not None:
-                from bot.mason_recruit_delivery import (
-                    deliver_mason_recruit_membership_message,
-                )
+            pending_uid = game.mason_pending_recruit_uid
+            tailor = ms_msn.find_mason_tailor(game)
+            if (
+                pending_uid is not None
+                and tailor is not None
+                and tailor.is_alive
+                and pending_uid == tailor.user_id
+                and ms_msn.mason_show_alive_tailor_recruit_button(game, mason)
+            ):
+                welcome = ms_msn.commit_mason_recruit_tailor(game, mason)
+                if welcome is None:
+                    await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                    return
+                recruit_uid = game.mason_pending_recruit_uid
+                if recruit_uid is not None:
+                    from bot.mason_recruit_delivery import (
+                        deliver_mason_recruit_membership_message,
+                    )
 
-                await deliver_mason_recruit_membership_message(
-                    bot, game, recruit_uid, welcome
-                )
-            game.mason_night_mason_confirmed = True
-            await callback.answer("ثبت شد.")
-            await _after_role_confirmed(bot, game, gm, as_uid, "mason_recruit", "ماسون")
-            return
-        if act == MSM_PICK:
-            tgt = game.players.get(tid)
+                    await deliver_mason_recruit_membership_message(
+                        bot, game, recruit_uid, welcome
+                    )
+                game.mason_night_mason_confirmed = True
+                await callback.answer("ثبت شد.")
+                await _after_role_confirmed(bot, game, gm, as_uid, "mason_recruit", "ماسون")
+                return
+            tgt = game.players.get(pending_uid) if pending_uid is not None else None
             if tgt is None or not ms_msn.mason_can_recruit_target(game, mason, tgt):
-                await callback.answer("انتخاب نامعتبر.", show_alert=True)
+                if game.mason_mason_night_no_recruit:
+                    ms_msn.commit_mason_recruit(game, mason, None)
+                    game.mason_night_mason_confirmed = True
+                    await callback.answer("ثبت شد.")
+                    await _after_role_confirmed(bot, game, gm, as_uid, "mason_recruit", "ماسون")
+                    return
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
                 return
             welcome = ms_msn.commit_mason_recruit(game, mason, tgt)
             if welcome:
@@ -1292,6 +1883,7 @@ async def dispatch_mason_night_role(
             game.mason_night_mason_confirmed = True
             await callback.answer("ثبت شد.")
             await _after_role_confirmed(bot, game, gm, as_uid, "mason_recruit", "ماسون")
+            return
         return
 
     # --- Detective ---
@@ -1301,9 +1893,37 @@ async def dispatch_mason_night_role(
             await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
             return
         if act == MSDT_PICK:
-            if not detective_commit_pick(game, tid):
+            tgt = game.players.get(tid)
+            if tgt is None or not any(
+                p.user_id == tid for p in investigation_pool(game)
+            ):
                 await callback.answer("انتخاب نامعتبر.", show_alert=True)
                 return
+            if game.mason_night_detective_pending_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                game.mason_night_detective_pending_uid = None
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                # فقط انتخاب موقت — استعلام پس از تأیید نهایی.
+                game.mason_night_detective_pending_uid = tid
+                await callback.answer("انتخاب شد.")
+            await _show_mason_detective_panel(bot, game, gm, as_uid)
+            return
+        if act == MSDT_BACK:
+            game.mason_night_detective_pending_uid = None
+            await callback.answer("بازگشت.")
+            await _show_mason_detective_panel(bot, game, gm, as_uid, initial=False)
+            return
+        if act == MSDT_CONFIRM:
+            pending_uid = game.mason_night_detective_pending_uid
+            tgt = game.players.get(pending_uid) if pending_uid is not None else None
+            if (
+                tgt is None
+                or not any(p.user_id == pending_uid for p in investigation_pool(game))
+            ):
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
+                return
+            detective_commit_pick(game, pending_uid)
             game.mason_night_detective_confirmed = True
             await callback.answer("ثبت شد.")
             await _after_role_confirmed(bot, game, gm, as_uid, "mason_detective", "کارآگاه")
@@ -1316,12 +1936,33 @@ async def dispatch_mason_night_role(
             await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
             return
         tgt = game.players.get(tid)
-        if act == MSNA_PICK and tgt and ms_nat.commit_mason_natasha_target(game, nat, tgt, confirmed=True):
+        if act == MSNA_PICK and tgt and ms_nat.mason_natasha_can_target(game, nat, tgt):
+            if game.mason_natasha_target_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                ms_nat.clear_mason_natasha_night_pick(game)
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                ms_nat.commit_mason_natasha_target(game, nat, tgt, confirmed=False)
+                await callback.answer("انتخاب شد.")
+            await _show_mason_natasha_panel(bot, game, gm, as_uid)
+            return
+        if act == MSNA_BACK:
+            ms_nat.clear_mason_natasha_night_pick(game)
+            await callback.answer("بازگشت.")
+            await _show_mason_natasha_panel(bot, game, gm, as_uid, initial=False)
+            return
+        if act == MSNA_CONFIRM:
+            pending_uid = game.mason_natasha_target_uid
+            tgt = game.players.get(pending_uid) if pending_uid is not None else None
+            if tgt is None or not ms_nat.mason_natasha_can_target(game, nat, tgt):
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
+                return
+            ms_nat.commit_mason_natasha_target(game, nat, tgt, confirmed=True)
             game.mason_night_natasha_confirmed = True
             await callback.answer("ثبت شد.")
             await _after_role_confirmed(bot, game, gm, as_uid, "mason_natasha", "ناتاشا")
-        else:
-            await callback.answer("انتخاب نامعتبر.", show_alert=True)
+            return
+        await callback.answer("انتخاب نامعتبر.", show_alert=True)
         return
 
     # --- Priest ---
@@ -1331,9 +1972,30 @@ async def dispatch_mason_night_role(
             await callback.answer("این مرحله دیگر فعال نیست.", show_alert=True)
             return
         tgt = game.players.get(tid)
-        if act == MSPR_PICK and tgt and ms_pr.commit_mason_priest_target(game, pr, tgt, confirmed=True):
+        if act == MSPR_PICK and tgt and ms_pr.mason_priest_can_target(game, pr, tgt):
+            if game.mason_priest_target_uid == tid:
+                # لمس دوبارهٔ همان بازیکن = لغو انتخاب (قرمز → آبی).
+                ms_pr.clear_mason_priest_night_pick(game)
+                await callback.answer("انتخاب حذف شد.")
+            else:
+                ms_pr.commit_mason_priest_target(game, pr, tgt, confirmed=False)
+                await callback.answer("انتخاب شد.")
+            await _show_mason_priest_panel(bot, game, gm, as_uid)
+            return
+        if act == MSPR_BACK:
+            ms_pr.clear_mason_priest_night_pick(game)
+            await callback.answer("بازگشت.")
+            await _show_mason_priest_panel(bot, game, gm, as_uid, initial=False)
+            return
+        if act == MSPR_CONFIRM:
+            pending_uid = game.mason_priest_target_uid
+            tgt = game.players.get(pending_uid) if pending_uid is not None else None
+            if tgt is None or not ms_pr.mason_priest_can_target(game, pr, tgt):
+                await callback.answer(MASON_COMMANDER_FIRST_PICK_REQUIRED_TEXT, show_alert=True)
+                return
+            ms_pr.commit_mason_priest_target(game, pr, tgt, confirmed=True)
             game.mason_night_priest_confirmed = True
             await callback.answer("ثبت شد.")
             await _after_role_confirmed(bot, game, gm, as_uid, "mason_priest", "کشیش")
-        else:
-            await callback.answer("انتخاب نامعتبر.", show_alert=True)
+            return
+        await callback.answer("انتخاب نامعتبر.", show_alert=True)
